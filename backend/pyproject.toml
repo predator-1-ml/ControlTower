@@ -26,6 +26,7 @@ dependencies = [
     # ---------------------------------------------------------- LLM providers
     # Two providers behind one interface — see ADR-004.
     "langchain-anthropic>=1.0",          # local dev: native async
+    "langchain-google-genai>=2.1",       # local dev: free tier, no cloud account needed
     "langchain-aws==1.7.8",              # production: Bedrock
     # Required to READ credentials minted by `aws login` (the OAuth/login
     # credential provider). Without it botocore raises

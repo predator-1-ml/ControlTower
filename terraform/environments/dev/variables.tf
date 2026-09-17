@@ -93,3 +93,15 @@ variable "state_bucket" {
   type        = string
   default     = "control-tower-tfstate"
 }
+
+variable "budget_email" {
+  description = "Budget alerts go here. AWS sends a confirmation email first."
+  type        = string
+  default     = "ajjukrish2000@gmail.com"
+}
+
+variable "budget_limit_usd" {
+  description = "Monthly ceiling. ~$20 is about four days of continuous uptime."
+  type        = string
+  default     = "20"
+}

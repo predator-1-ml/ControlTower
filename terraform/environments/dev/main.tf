@@ -251,3 +251,16 @@ module "github_oidc" {
 
   tags = local.tags
 }
+
+# ------------------------------------------------------------ cost guardrail
+
+# Created FIRST in dependency terms — it is the cheapest thing in the stack and
+# the only one that protects you from the rest. The real risk here is not any
+# single resource; it is forgetting to run `terraform destroy`.
+module "budget" {
+  source = "../../modules/budget"
+
+  name               = local.name
+  notification_email = var.budget_email
+  monthly_limit_usd  = var.budget_limit_usd
+}

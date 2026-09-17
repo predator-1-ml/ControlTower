@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { ChatPanel } from "@/components/ChatPanel";
 import { WorkflowPanel } from "@/components/WorkflowPanel";
@@ -17,7 +17,20 @@ export default function Page() {
   // Stable for the tab's lifetime. This is the checkpointer's thread_id, so it
   // is also what makes a workflow resumable — including after the backend has
   // been restarted underneath it.
-  const sessionId = useRef(`ui-${crypto.randomUUID()}`).current;
+  //
+  // Generated in an effect, NOT inline, and that is load-bearing. This component
+  // is server-rendered first and then hydrated; `crypto.randomUUID()` called
+  // during render produces a different value on each side, the ids disagree in
+  // the rendered HTML, and React discards the whole tree and regenerates it:
+  //
+  //   "Hydration failed because the server rendered text didn't match the client"
+  //
+  // Effects run only on the client, so the server renders an empty id, hydration
+  // matches, and the id is filled in immediately afterwards.
+  const [sessionId, setSessionId] = useState("");
+  useEffect(() => {
+    setSessionId(`ui-${crypto.randomUUID()}`);
+  }, []);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -28,6 +41,10 @@ export default function Page() {
 
   const send = useCallback(
     async (text: string) => {
+      // The id is set by an effect on mount, so it is empty for one frame.
+      // Sending without it would start a graph run on an empty thread_id.
+      if (!sessionId) return;
+
       setMessages((prev) => [...prev, { role: "user", text }]);
       setBusy(true);
       setPending(null);
@@ -115,7 +132,14 @@ export default function Page() {
           Onboarding, claims and knowledge — one conversation.
         </p>
         <div className="min-h-0 flex-1">
-          <ChatPanel messages={messages} pending={pending} busy={busy} onSend={send} />
+          {/* Disabled until the session id exists, so the composer cannot be
+              used during the single frame before the mount effect runs. */}
+          <ChatPanel
+            messages={messages}
+            pending={pending}
+            busy={busy || !sessionId}
+            onSend={send}
+          />
         </div>
       </section>
 

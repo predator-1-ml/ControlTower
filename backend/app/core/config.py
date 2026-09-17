@@ -21,8 +21,17 @@ class Settings(BaseSettings):
     )
 
     # --- LLM provider (ADR-004) -------------------------------------------
-    llm_provider: Literal["anthropic", "bedrock"] = "anthropic"
+    #
+    # bedrock   production, and the only one the deployed stack uses
+    # anthropic local dev, strongest model
+    # gemini    local dev, free tier — for working without AWS credentials
+    #
+    # All three exist behind one interface precisely so this choice is a config
+    # value rather than a code change. Production is Bedrock regardless.
+    llm_provider: Literal["anthropic", "bedrock", "gemini"] = "anthropic"
     anthropic_api_key: str | None = None
+    google_api_key: str | None = None
+    gemini_model_id: str = "gemini-flash-latest"
     aws_region: str = "ap-southeast-1"
 
     # ChatBedrockConverse targets the bedrock-runtime Converse API, which needs

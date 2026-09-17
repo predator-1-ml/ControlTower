@@ -64,11 +64,11 @@ def _model_id_for(role: _Role | None, settings: Settings) -> str:
     }.get(role or "")
     if override:
         return override
-    return (
-        settings.bedrock_model_id
-        if settings.llm_provider == "bedrock"
-        else settings.anthropic_model_id
-    )
+    return {
+        "bedrock": settings.bedrock_model_id,
+        "gemini": settings.gemini_model_id,
+        "anthropic": settings.anthropic_model_id,
+    }[settings.llm_provider]
 
 
 def get_chat_model(
@@ -98,12 +98,30 @@ def get_chat_model(
             **kwargs,
         )
 
+    if settings.llm_provider == "gemini":
+        # Local development only. Deliberately never used by the deployed stack:
+        # calling Google for inference from a system whose whole networking and
+        # IAM story is AWS would be an odd thing to have to explain.
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        if not settings.google_api_key:
+            raise RuntimeError(
+                "LLM_PROVIDER=gemini but GOOGLE_API_KEY is unset. "
+                "Put it in backend/.env (gitignored)."
+            )
+
+        return ChatGoogleGenerativeAI(
+            model=model_id,
+            google_api_key=settings.google_api_key,
+            **kwargs,
+        )
+
     from langchain_anthropic import ChatAnthropic
 
     if not settings.anthropic_api_key:
         raise RuntimeError(
             "LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is unset. "
-            "Set it in .env, or switch LLM_PROVIDER=bedrock."
+            "Set it in .env, or switch LLM_PROVIDER=bedrock or gemini."
         )
 
     return ChatAnthropic(

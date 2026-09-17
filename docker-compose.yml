@@ -29,15 +29,27 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    # backend/.env is the single source of truth for local provider choice and
+    # secrets. It is gitignored, and putting keys there keeps them off the
+    # command line and out of shell history.
+    #
+    # ORDERING MATTERS: compose `environment:` OVERRIDES `env_file`. So anything
+    # a developer sets in .env must NOT also appear below — a passthrough like
+    # `GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}` sets the variable to an EMPTY STRING
+    # when it is unset in the shell, which silently beats the real value in .env
+    # and produces a "key is unset" error while the key is plainly sitting there.
+    env_file:
+      - path: ./backend/.env
+        required: false
+
     environment:
-      # Inside the compose network the host is the service name, not localhost.
+      # Only values that MUST differ inside the compose network. Inside it the
+      # database host is the service name, not localhost.
       DATABASE_URL: postgresql://control_tower:control_tower@postgres:5432/control_tower
-      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      AWS_REGION: ${AWS_REGION:-us-east-1}
-      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-us.anthropic.claude-opus-4-8}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       APP_ENV: local
+      # Read from the shell so `AWS_PROFILE=x docker compose up` works; harmless
+      # when empty because the AWS SDK falls back to the default profile.
+      AWS_PROFILE: ${AWS_PROFILE:-}
     ports:
       - "8000:8000"
     depends_on:
@@ -45,6 +57,9 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      # Host AWS credentials, read-only. Local dev only — on ECS the task role
+      # supplies credentials and there is no file to mount.
+      - ${USERPROFILE:-${HOME}}/.aws:/home/appuser/.aws:ro
     # --reload for local iteration only; the image CMD is the production entrypoint.
     command: >
       uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
