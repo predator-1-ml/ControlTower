@@ -41,6 +41,40 @@ from app.core.config import Settings, get_settings
 _Role = str  # "planner" | "supervisor" | None -> main model
 
 
+def message_text(response: Any) -> str:
+    """Extract plain text from a model response, whatever shape it arrives in.
+
+    `.content` is NOT reliably a string. Anthropic returns one; Gemini returns a
+    list of content blocks:
+
+        [{"type": "text", "text": "...", "index": 0,
+          "extras": {"signature": "<multi-kilobyte blob>"}}]
+
+    Using `.content` directly therefore puts a list — signature blob and all —
+    into graph state, where it is checkpointed to Postgres and serialised into
+    every SSE frame. It does not raise; it just quietly ships kilobytes of
+    provider internals to the browser and stores them forever.
+
+    Centralised here so provider differences stay inside the provider module,
+    which is the point of having one.
+    """
+    content = getattr(response, "content", response)
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+        return "".join(parts)
+
+    return str(content)
+
+
 def configure_event_loop_executor(settings: Settings | None = None) -> None:
     """Widen the default thread pool that `run_in_executor` uses.
 

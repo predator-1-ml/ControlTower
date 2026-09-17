@@ -15,11 +15,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
 from app.graph.deps import Deps
 from app.graph.state import ControlTowerState, TaskStatus
+from app.llm.provider import message_text
 
 SYSTEM_PROMPT = """You report the outcome of operations work to a handler.
 
@@ -57,13 +58,18 @@ def _summarise(state: ControlTowerState) -> str:
 async def compose_response(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[str, Any]:
     pending = [t for t in state.get("plan", []) if t.status is TaskStatus.NEEDS_INPUT]
 
+    # HumanMessage, NOT AIMessage. Putting the results in an assistant turn makes
+    # the model read them as its own half-finished output and CONTINUE the list —
+    # observed inventing `[t2] email.send_onboarding_failed -> skipped` and a
+    # fabricated Slack channel id for workflows that do not exist. As a user turn
+    # it is data to report on, not a draft to extend.
     response = await runtime.context.model.ainvoke(
         [
             SystemMessage(content=SYSTEM_PROMPT),
-            AIMessage(content=f"Task results:\n{_summarise(state)}"),
+            HumanMessage(content=f"Task results:\n{_summarise(state)}"),
         ]
     )
-    text = response.content if hasattr(response, "content") else str(response)
+    text = message_text(response)
 
     return {
         "final_response": text,

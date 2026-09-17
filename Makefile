@@ -6,7 +6,7 @@ BACKEND := backend
 PY      := $(BACKEND)/.venv/Scripts/python.exe   # POSIX venvs: .venv/bin/python
 
 .DEFAULT_GOAL := help
-.PHONY: help setup up down logs migrate seed test test-db lint fmt verify-resume clean
+.PHONY: help setup up rebuild ps tail down logs migrate seed ingest test test-db lint fmt verify-resume clean
 
 help: ## Show available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -15,8 +15,21 @@ help: ## Show available targets
 setup: ## Create the venv and install backend deps
 	cd $(BACKEND) && uv venv --python 3.12 && uv pip install -e ".[dev]"
 
-up: ## Start Postgres (+ app services) in the background
+up: ## Start the full stack (postgres + backend + frontend)
 	docker compose up -d
+
+rebuild: ## Rebuild images and restart — needed after changing dependencies
+	# Source is volume-mounted so code changes are live without this. Deps are
+	# baked into the image (/opt/venv, node_modules), so pyproject.toml or
+	# package.json changes need a rebuild or you get ModuleNotFoundError against
+	# a package that is plainly installed locally.
+	docker compose up -d --build
+
+ps: ## Show service status
+	docker compose ps
+
+tail: ## Follow backend logs
+	docker compose logs -f backend
 
 down: ## Stop everything
 	docker compose down

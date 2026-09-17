@@ -28,6 +28,7 @@ from langgraph.runtime import Runtime
 from app.db import repository
 from app.graph.deps import Deps
 from app.graph.state import ControlTowerState, TaskStatus, running_task, task_delta
+from app.llm.provider import message_text
 
 WORKFLOW = "knowledge"
 TOP_K = 4
@@ -131,7 +132,7 @@ async def generate(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[str
     response = await runtime.context.model.ainvoke(
         [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
     )
-    answer = response.content if hasattr(response, "content") else str(response)
+    answer = message_text(response)
 
     # Citations come from what was actually retrieved, never from the model's
     # output. A model asked to list its sources will occasionally list one it did

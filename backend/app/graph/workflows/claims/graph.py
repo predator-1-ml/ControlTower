@@ -28,6 +28,7 @@ from app.graph.state import (
     running_task,
     task_delta,
 )
+from app.llm.provider import message_text
 
 WORKFLOW = "claims"
 
@@ -198,7 +199,7 @@ async def summarise(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[st
     )
 
     response = await runtime.context.model.ainvoke(prompt)
-    summary = response.content if hasattr(response, "content") else str(response)
+    summary = message_text(response)
 
     await repository.record_audit_event(
         runtime.context.pool,
