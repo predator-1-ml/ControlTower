@@ -148,6 +148,36 @@ Terraform needs `AWS_PROFILE=Nyomad` in the environment. Deliberately NOT
 hardcoded as `profile =` in any `.tf`, because GitHub Actions authenticates via
 OIDC and has no profile.
 
+**Bedrock model access, probed directly on 2026-09-17.** Listing a model does not
+mean you can invoke it — always test with a real `converse` call:
+
+| Model | Invocable? |
+|---|---|
+| `global.anthropic.claude-opus-4-8` | ❌ "not available for this account" |
+| `global.anthropic.claude-sonnet-5` | ❌ same |
+| `global.anthropic.claude-sonnet-4-6` | ✅ **what prod uses** |
+| `global.anthropic.claude-haiku-4-5-20251001-v1:0` | ✅ |
+| `apac.*` legacy profiles | ❌ blocked as Legacy + unused |
+| `cohere.embed-english-v3` | ✅ **what RAG uses** |
+
+A fresh AWS account does not get the newest models without contacting AWS Sales.
+Local dev uses Opus 4.8 via the Anthropic API, which has no such restriction —
+the divergence is exactly what the provider abstraction exists for.
+
+**Amazon Titan embeddings do not exist in ap-southeast-1** — only Cohere.
+`cohere.embed-english-v3` is also 1024-dimensional, so `vector(1024)` is
+unchanged, but the *reason* is region-specific.
+
+**Verified in this account (2026-09-17), so do not re-derive:** 3 AZs; Fargate
+quota 30 vCPU; 5 EIPs and 5 VPCs per region; `db.t4g.micro` orderable on
+PostgreSQL 17.11 and 18.6; account otherwise empty apart from the default VPC at
+`172.31.0.0/16` (no collision with our `10.0.0.0/16`).
+
+**`describe-db-engine-versions` has no `SupportedExtensions` field.** Querying it
+returns `None`, which looks like "pgvector unavailable" but means "no such key".
+The pgvector version can only be confirmed from a running instance:
+`SELECT * FROM pg_available_extensions WHERE name = 'vector';`
+
 **Nothing loop-bound may be built at import time.** `AsyncPostgresSaver.__init__`
 captures the running loop, so the graph is compiled in the FastAPI lifespan.
 There is no importable module-level `graph`; handlers read `request.app.state.graph`.

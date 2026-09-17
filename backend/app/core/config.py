@@ -37,8 +37,21 @@ class Settings(BaseSettings):
     # Check before changing region:
     #   aws bedrock list-inference-profiles --region <region> \
     #     --query "inferenceProfileSummaries[].inferenceProfileId"
-    bedrock_model_id: str = "global.anthropic.claude-opus-4-8"
+    #
+    # Sonnet 4.6 rather than Opus 4.8 because Opus 4.8 and Sonnet 5 are both
+    # "not available for this account" on Bedrock here — a fresh account does not
+    # get the newest models without contacting AWS Sales. Probed directly; see
+    # CLAUDE.md. This is an availability constraint, not a cost decision.
+    bedrock_model_id: str = "global.anthropic.claude-sonnet-4-6"
+
+    # Local dev goes through the Anthropic API, which has no such restriction,
+    # so it keeps the stronger model. This divergence is exactly what the
+    # provider abstraction is for.
     anthropic_model_id: str = "claude-opus-4-8"
+
+    # RAG embeddings. Amazon Titan is not offered in ap-southeast-1; Cohere is.
+    # 1024 dimensions, matching the vector(1024) column in migration 0001.
+    embedding_model_id: str = "cohere.embed-english-v3"
 
     # Optional cheaper tiers for the two highest-frequency nodes. Empty = use
     # the main model. Planner and supervisor are structured-output calls made on

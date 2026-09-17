@@ -62,9 +62,16 @@ CREATE TABLE knowledge_chunks (
     source     text NOT NULL,        -- document name, cited back to the user
     section    text,
     content    text NOT NULL,
-    -- 1024 = Amazon Titan Text Embeddings V2. Changing embedding model means
-    -- changing this number AND re-embedding everything: the dimension is part of
-    -- the column type, so a mismatch is a hard insert error, not silent drift.
+    -- 1024 dimensions = cohere.embed-english-v3.
+    --
+    -- Chosen after checking what Bedrock actually offers in ap-southeast-1:
+    -- Amazon Titan embeddings are NOT available there, only Cohere. Titan V2 is
+    -- also 1024, so the column type is unchanged, but the reason is different
+    -- and region-dependent.
+    --
+    -- Changing embedding model means changing this number AND re-embedding
+    -- everything. The dimension is part of the column type, so a mismatch is a
+    -- hard insert error rather than silent drift, which is the good outcome.
     embedding  vector(1024),
     created_at timestamptz NOT NULL DEFAULT now()
 );
