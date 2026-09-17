@@ -1,0 +1,124 @@
+name: deploy-backend
+
+on:
+  push:
+    branches: [main]
+    paths: ["backend/**", ".github/workflows/deploy-backend.yml"]
+  workflow_dispatch:
+
+# Two deploys of the same service must not overlap, and cancelling one mid-flight
+# leaves ECS partway through a rolling update.
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-southeast-1
+  ECR_REPOSITORY: control-tower-dev/backend
+  ECS_CLUSTER: control-tower-dev
+  ECS_SERVICE: control-tower-dev-backend
+  CONTAINER_NAME: control-tower-dev-backend
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    # The environment is load-bearing, not decoration. The OIDC subject claim
+    # only contains `environment:dev` when the job declares it — and the trust
+    # policy requires that claim. So a required reviewer on this environment is a
+    # precondition for the AWS credential existing at all, rather than a UI gate.
+    environment: dev
+
+    permissions:
+      id-token: write # mint the OIDC token
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Assume deploy role via OIDC
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Native arm64, matching runtime_platform.cpu_architecture = ARM64 in the
+      # task definition. Building arm64 under QEMU on an x64 runner works but is
+      # slow enough to be worth avoiding.
+      - name: Build and push
+        id: image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          IMAGE="$REGISTRY/$ECR_REPOSITORY:${{ github.sha }}"
+          docker build -t "$IMAGE" backend
+          docker push "$IMAGE"
+
+          # Deploy by DIGEST, not tag. A task definition storing a tag cannot be
+          # rolled back deterministically: revision N-1 re-resolves the tag to
+          # whatever it points at now, which after a bad deploy is the bad image.
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE")
+          echo "image=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Deploying $DIGEST"
+
+      # Migrations run as a ONE-OFF task before the service update.
+      #
+      # Not at app startup: N tasks would race the same migration, and
+      # AsyncPostgresSaver.setup() holds no advisory lock, so losers crash on a
+      # UniqueViolation and concurrent CREATE INDEX CONCURRENTLY can leave an
+      # INVALID index behind. One process, one advisory lock, before anything
+      # else starts. See backend/app/scripts/migrate.py.
+      - name: Run migrations
+        run: |
+          set -euo pipefail
+          TASK_DEF=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query 'services[0].taskDefinition' --output text)
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "$ECS_CLUSTER" \
+            --task-definition "$TASK_DEF" \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ vars.PRIVATE_SUBNET_IDS }}],securityGroups=[${{ vars.BACKEND_SG_ID }}],assignPublicIp=DISABLED}" \
+            --overrides '{"containerOverrides":[{"name":"'"$CONTAINER_NAME"'","command":["python","-m","app.scripts.migrate"]}]}' \
+            --query 'tasks[0].taskArn' --output text)
+
+          aws ecs wait tasks-stopped --cluster "$ECS_CLUSTER" --tasks "$TASK_ARN"
+
+          # `wait tasks-stopped` returns when the task stops — including when it
+          # stopped because it FAILED. The exit code is the only thing that says
+          # whether the migration worked, so check it explicitly or a broken
+          # migration deploys silently.
+          EXIT=$(aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$TASK_ARN" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+          echo "migration exit code: $EXIT"
+          [ "$EXIT" = "0" ] || { echo "::error::migration failed"; exit 1; }
+
+      - name: Render task definition
+        id: taskdef
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition control-tower-dev-backend \
+            --query taskDefinition > taskdef.json
+          echo "path=taskdef.json" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/amazon-ecs-render-task-definition@v1
+        id: render
+        with:
+          task-definition: ${{ steps.taskdef.outputs.path }}
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.image.outputs.image }}
+
+      - uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          # Without this the SDK backs off to 600s between polls and the job
+          # looks hung for ten minutes after the deploy has already finished.
+          wait-for-minutes: 10

@@ -37,3 +37,16 @@ output "private_subnet_ids" {
 output "backend_security_group_id" {
   value = module.networking.backend_sg_id
 }
+
+output "github_deploy_role_arn" {
+  description = "Set as repository variable AWS_DEPLOY_ROLE_ARN"
+  value       = module.github_oidc.deploy_role_arn
+}
+
+output "github_terraform_plan_role_arn" {
+  value = module.github_oidc.terraform_plan_role_arn
+}
+
+output "github_terraform_apply_role_arn" {
+  value = module.github_oidc.terraform_apply_role_arn
+}

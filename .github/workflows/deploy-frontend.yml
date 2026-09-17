@@ -1,0 +1,77 @@
+name: deploy-frontend
+
+on:
+  push:
+    branches: [main]
+    paths: ["frontend/**", ".github/workflows/deploy-frontend.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-frontend
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-southeast-1
+  ECR_REPOSITORY: control-tower-dev/frontend
+  ECS_CLUSTER: control-tower-dev
+  ECS_SERVICE: control-tower-dev-frontend
+  CONTAINER_NAME: control-tower-dev-frontend
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # No build args carrying a backend URL, deliberately. The image is
+      # environment-agnostic: client code calls the relative /bff/* proxy and the
+      # route handler reads BACKEND_INTERNAL_URL at request time. A
+      # NEXT_PUBLIC_API_URL build arg would be inlined into the browser bundle
+      # and pin this image to one environment (ADR-001).
+      - name: Build and push
+        id: image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          IMAGE="$REGISTRY/$ECR_REPOSITORY:${{ github.sha }}"
+          docker build -t "$IMAGE" frontend
+          docker push "$IMAGE"
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE")
+          echo "image=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Render task definition
+        id: taskdef
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition control-tower-dev-frontend \
+            --query taskDefinition > taskdef.json
+          echo "path=taskdef.json" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/amazon-ecs-render-task-definition@v1
+        id: render
+        with:
+          task-definition: ${{ steps.taskdef.outputs.path }}
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.image.outputs.image }}
+
+      - uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          wait-for-minutes: 10

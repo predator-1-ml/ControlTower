@@ -1,0 +1,130 @@
+name: terraform
+
+on:
+  push:
+    branches: [main]
+    paths: ["terraform/**", ".github/workflows/terraform.yml"]
+  pull_request:
+    paths: ["terraform/**", ".github/workflows/terraform.yml"]
+
+# cancel-in-progress: FALSE, unlike the CI workflows. Two applies running at once
+# race the state lock, and cancelling one mid-apply can leave state describing
+# infrastructure that does not exist. Queue instead.
+concurrency:
+  group: terraform
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-southeast-1
+  TF_VERSION: "1.16.3"
+  WORKDIR: terraform/environments/dev
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+
+    # Job outputs must be declared explicitly. A step output is NOT visible to a
+    # downstream job without this block — `needs.plan.outputs.exitcode` would
+    # silently evaluate to empty, and the `!= '0'` guard on apply would pass on
+    # every push, applying when there was nothing to apply.
+    outputs:
+      exitcode: ${{ steps.plan.outputs.exitcode }}
+
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # Read-only role. Plan runs on every pull request with no approval gate, so
+      # it must not be able to change anything.
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_TF_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Format check
+        run: terraform fmt -check -recursive terraform/
+
+      - name: Init
+        working-directory: ${{ env.WORKDIR }}
+        run: terraform init -input=false
+
+      - name: Validate
+        working-directory: ${{ env.WORKDIR }}
+        run: terraform validate
+
+      # -detailed-exitcode: 0 = no changes, 2 = changes, 1 = error.
+      # Without it, `plan` exits 0 whether or not it failed to produce a plan.
+      - name: Plan
+        id: plan
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set +e
+          terraform plan -input=false -no-color -detailed-exitcode -out=tfplan
+          code=$?
+          set -e
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          [ "$code" -eq 1 ] && exit 1
+          exit 0
+
+      # The plan file is uploaded so apply runs THAT EXACT PLAN rather than
+      # re-planning. Re-planning at apply time means approving one diff and
+      # applying a different one if anything changed in between.
+      #
+      # ⚠️ A plan file contains resource attributes in cleartext. This artifact is
+      # sensitive; it is short-lived and the repository is public, so nothing
+      # secret should reach it — the DB password never does, because
+      # manage_master_user_password keeps it out of state entirely.
+      - name: Upload plan
+        if: github.ref == 'refs/heads/main' && steps.plan.outputs.exitcode == '2'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.WORKDIR }}/tfplan
+          retention-days: 1
+
+  apply:
+    needs: plan
+    if: github.ref == 'refs/heads/main' && needs.plan.outputs.exitcode != '0'
+    runs-on: ubuntu-latest
+
+    # Required reviewers on this environment gate the credential itself: the
+    # OIDC subject only carries `environment:dev` when the job declares it, and
+    # the apply role's trust policy requires exactly that.
+    environment: dev
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_TF_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Init
+        working-directory: ${{ env.WORKDIR }}
+        run: terraform init -input=false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.WORKDIR }}
+
+      - name: Apply the reviewed plan
+        working-directory: ${{ env.WORKDIR }}
+        run: terraform apply -input=false -auto-approve tfplan

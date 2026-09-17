@@ -228,3 +228,26 @@ module "frontend" {
 
   tags = local.tags
 }
+
+# ----------------------------------------------------------- CI/CD identity
+
+module "github_oidc" {
+  source = "../../modules/github-oidc"
+
+  name       = local.name
+  owner      = var.github_owner
+  repository = var.github_repository
+
+  # Numeric ids for the immutable subject claim. This repository was created
+  # after 2026-07-15, so GitHub mints the new claim format and a trust policy
+  # written only against the classic form will not match.
+  owner_id      = var.github_owner_id
+  repository_id = var.github_repository_id
+
+  environments        = [var.environment]
+  ecr_repository_arns = values(module.ecr.repository_arns)
+  task_role_arns      = [module.cluster.execution_role_arn, module.cluster.task_role_arn]
+  state_bucket_arn    = "arn:aws:s3:::${var.state_bucket}"
+
+  tags = local.tags
+}

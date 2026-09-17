@@ -65,3 +65,31 @@ variable "embedding_model_id" {
   type        = string
   default     = "cohere.embed-english-v3"
 }
+
+variable "github_owner" {
+  type    = string
+  default = "predator-1-ml"
+}
+
+variable "github_repository" {
+  type    = string
+  default = "ControlTower"
+}
+
+variable "github_owner_id" {
+  description = "gh api repos/OWNER/REPO --jq .owner.id"
+  type        = string
+  default     = "66988630"
+}
+
+variable "github_repository_id" {
+  description = "gh api repos/OWNER/REPO --jq .id"
+  type        = string
+  default     = "1373064236"
+}
+
+variable "state_bucket" {
+  description = "Must match the bucket in backend.tf"
+  type        = string
+  default     = "control-tower-tfstate"
+}
