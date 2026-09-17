@@ -23,12 +23,21 @@ class Settings(BaseSettings):
     # --- LLM provider (ADR-004) -------------------------------------------
     llm_provider: Literal["anthropic", "bedrock"] = "anthropic"
     anthropic_api_key: str | None = None
-    aws_region: str = "us-east-1"
+    aws_region: str = "ap-southeast-1"
 
-    # ChatBedrockConverse targets the bedrock-runtime Converse API, which
-    # requires a geo inference-profile prefix (us. / eu. / apac.). The bare id
-    # is rejected for on-demand throughput — a genuinely confusing 400.
-    bedrock_model_id: str = "us.anthropic.claude-opus-4-8"
+    # ChatBedrockConverse targets the bedrock-runtime Converse API, which needs
+    # an *inference profile* id, not a bare model id — the bare id is rejected
+    # for on-demand throughput.
+    #
+    # The prefix is regional and not guessable. Verified against this account in
+    # ap-southeast-1: `apac.` profiles exist only for older models (Claude 3.x,
+    # Sonnet 4); every current model is `global.`-prefixed. `us.` does not
+    # resolve here at all.
+    #
+    # Check before changing region:
+    #   aws bedrock list-inference-profiles --region <region> \
+    #     --query "inferenceProfileSummaries[].inferenceProfileId"
+    bedrock_model_id: str = "global.anthropic.claude-opus-4-8"
     anthropic_model_id: str = "claude-opus-4-8"
 
     # Optional cheaper tiers for the two highest-frequency nodes. Empty = use

@@ -136,8 +136,17 @@ boto3 onto a thread pool, holding a thread for the whole call including a stream
 response. Raise `executor_max_workers` **and** `boto_max_pool_connections`
 together, or the bottleneck just moves.
 
-**Bedrock model IDs need a geo prefix** via the Converse API:
-`us.anthropic.claude-opus-4-8`. The bare ID is rejected for on-demand throughput.
+**Bedrock needs an inference-profile ID, and the prefix is regional.** The bare
+model ID is rejected for on-demand throughput. Verified in `ap-southeast-1`:
+`apac.` profiles exist only for older models; every current model is
+`global.`-prefixed (`global.anthropic.claude-opus-4-8`). `us.` does not resolve
+there. Never assume the prefix — run
+`aws bedrock list-inference-profiles --region <region>`.
+
+**AWS account: `187880375508`, region `ap-southeast-1`, profile `Nyomad`.**
+Terraform needs `AWS_PROFILE=Nyomad` in the environment. Deliberately NOT
+hardcoded as `profile =` in any `.tf`, because GitHub Actions authenticates via
+OIDC and has no profile.
 
 **Nothing loop-bound may be built at import time.** `AsyncPostgresSaver.__init__`
 captures the running loop, so the graph is compiled in the FastAPI lifespan.
