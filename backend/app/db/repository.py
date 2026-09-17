@@ -92,6 +92,63 @@ async def create_application(
     return _serialise(row)
 
 
+async def search_knowledge(
+    pool: AsyncConnectionPool, embedding: list[float], limit: int = 4
+) -> list[dict[str, Any]]:
+    """Nearest knowledge chunks by cosine distance.
+
+    `<=>` is cosine distance and must pair with the `vector_cosine_ops` opclass on
+    the index. If the two disagree the planner silently falls back to a sequential
+    scan: correct answers, terrible latency, and every test still passes.
+
+    `embedding IS NOT NULL` matters because seed rows are inserted before they are
+    embedded. Without it, un-embedded rows sort as maximally distant and pad the
+    result set with irrelevant text that then gets cited.
+    """
+    vector = "[" + ",".join(str(x) for x in embedding) + "]"
+
+    async with pool.connection() as conn:
+        # Without iterative_scan, a filtered HNSW query can return fewer rows than
+        # requested — no error, just quietly missing results. This is the single
+        # most common "pgvector is broken" report. SET LOCAL needs a transaction.
+        async with conn.transaction():
+            await conn.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
+            cur = await conn.execute(
+                """
+                SELECT source, section, content,
+                       1 - (embedding <=> %s::vector) AS similarity
+                FROM knowledge_chunks
+                WHERE embedding IS NOT NULL
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (vector, vector, limit),
+            )
+            rows = await cur.fetchall()
+    return [_serialise(r) for r in rows]
+
+
+async def store_embedding(
+    pool: AsyncConnectionPool, chunk_id: str, embedding: list[float]
+) -> None:
+    vector = "[" + ",".join(str(x) for x in embedding) + "]"
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE knowledge_chunks SET embedding = %s::vector WHERE id = %s",
+            (vector, chunk_id),
+        )
+
+
+async def unembedded_chunks(pool: AsyncConnectionPool) -> list[dict[str, Any]]:
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT id::text, source, section, content FROM knowledge_chunks "
+            "WHERE embedding IS NULL"
+        )
+        rows = await cur.fetchall()
+    return [_serialise(r) for r in rows]
+
+
 async def record_audit_event(
     pool: AsyncConnectionPool,
     *,

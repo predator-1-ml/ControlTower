@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 from psycopg_pool import AsyncConnectionPool
 
@@ -27,3 +28,6 @@ from psycopg_pool import AsyncConnectionPool
 class Deps:
     pool: AsyncConnectionPool
     model: BaseChatModel
+    # Only the knowledge workflow needs this, so it stays optional — the other
+    # two workflows must be runnable without an embedding provider configured.
+    embedder: Embeddings | None = None

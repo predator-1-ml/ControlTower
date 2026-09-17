@@ -30,11 +30,12 @@ from app.graph.workflows.onboarding.graph import build_onboarding_graph
 RECURSION_LIMIT = 100
 
 
-def build_graph(checkpointer=None, *, include_knowledge: bool = False):
+def build_graph(checkpointer=None, *, include_knowledge: bool = True):
     """Compile the control tower graph.
 
-    `include_knowledge` is False until the RAG workflow lands; until then a
-    knowledge task fails with a clear reason rather than hanging the run.
+    `include_knowledge` exists so tests can exercise the supervisor's
+    failed-workflow path without standing up an embedder. In every real
+    configuration it is True.
     """
     builder = (
         StateGraph(ControlTowerState, context_schema=Deps)

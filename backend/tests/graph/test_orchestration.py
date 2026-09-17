@@ -167,7 +167,9 @@ async def test_dependency_blocks_until_prerequisite_completes():
             PlanTask(id="2", workflow="claims", action="retrieve_claims", depends_on=["1"]),
         ],
     )
-    graph = build_graph(checkpointer=InMemorySaver())
+    # include_knowledge=False makes the knowledge task fail deterministically,
+    # which is what this test needs: a failure whose dependents must be skipped.
+    graph = build_graph(checkpointer=InMemorySaver(), include_knowledge=False)
     result = await graph.ainvoke(
         state_with("look something up then check claims"),
         cfg("skip-chain"),

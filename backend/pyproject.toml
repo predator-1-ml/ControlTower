@@ -27,6 +27,12 @@ dependencies = [
     # Two providers behind one interface — see ADR-004.
     "langchain-anthropic>=1.0",          # local dev: native async
     "langchain-aws==1.7.8",              # production: Bedrock
+    # Required to READ credentials minted by `aws login` (the OAuth/login
+    # credential provider). Without it botocore raises
+    # "Missing Dependency: Using the login credential provider requires an
+    # additional dependency", which looks like a Bedrock problem but is an auth
+    # one. The AWS CLI bundles its own copy; a venv does not.
+    "botocore[crt]>=1.43",
 
     # ---------------------------------------------------------- web / data
     "fastapi>=0.118",
