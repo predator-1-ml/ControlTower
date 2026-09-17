@@ -1,0 +1,113 @@
+"""LLM provider abstraction — see ADR-004.
+
+Local development runs against the Anthropic API directly (natively async, no
+AWS model-access gating, fast iteration). Production runs on Bedrock for the
+AWS-native story. Graph code never imports either concrete class; it calls
+`get_chat_model()` and stays provider-agnostic.
+
+The uncomfortable detail worth knowing before you defend this design:
+
+    `ChatBedrockConverse` contains no `async def` at all.
+
+`ainvoke` / `astream` work only through `BaseChatModel`'s default
+`run_in_executor` bridge around blocking boto3. A worker thread is therefore
+held for the *entire* model call, including the full duration of a streamed
+response. The default executor is `min(32, cpu_count + 4)`, so a FastAPI service
+silently ceilings at ~32 concurrent model calls and everything beyond that
+queues with no error and no log line.
+
+Two ways out. We take the first because it keeps the standard Bedrock surface
+(Guardrails, Knowledge Bases, invocation logging) and the fix is two settings:
+
+  1. Raise the default executor AND botocore's `max_pool_connections` together.
+     Raising one without the other just relocates the bottleneck.
+  2. Use `langchain-aws`'s Anthropic-SDK-backed Bedrock client, which is
+     genuinely async — at the cost of fewer regions and no Guardrails.
+
+`configure_event_loop_executor()` below implements (1); it is called from the
+FastAPI lifespan.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import concurrent.futures
+from typing import Any
+
+from langchain_core.language_models import BaseChatModel
+
+from app.core.config import Settings, get_settings
+
+_Role = str  # "planner" | "supervisor" | None -> main model
+
+
+def configure_event_loop_executor(settings: Settings | None = None) -> None:
+    """Widen the default thread pool that `run_in_executor` uses.
+
+    Only meaningful for the Bedrock path. Harmless otherwise, so it is called
+    unconditionally from the lifespan rather than hidden behind a branch.
+    """
+    settings = settings or get_settings()
+    asyncio.get_running_loop().set_default_executor(
+        concurrent.futures.ThreadPoolExecutor(
+            max_workers=settings.executor_max_workers,
+            thread_name_prefix="llm",
+        )
+    )
+
+
+def _model_id_for(role: _Role | None, settings: Settings) -> str:
+    """Resolve the model id, honouring the optional cheaper tiers."""
+    override = {
+        "planner": settings.planner_model,
+        "supervisor": settings.supervisor_model,
+    }.get(role or "")
+    if override:
+        return override
+    return (
+        settings.bedrock_model_id
+        if settings.llm_provider == "bedrock"
+        else settings.anthropic_model_id
+    )
+
+
+def get_chat_model(
+    role: _Role | None = None,
+    *,
+    settings: Settings | None = None,
+    **kwargs: Any,
+) -> BaseChatModel:
+    """Return a chat model for `role` ("planner", "supervisor", or None).
+
+    Imports are deliberately function-local: a local dev run should not need
+    `langchain_aws` importable, and an ECS task should not need an Anthropic key
+    present just to import the module.
+    """
+    settings = settings or get_settings()
+    model_id = _model_id_for(role, settings)
+
+    if settings.llm_provider == "bedrock":
+        from botocore.config import Config
+        from langchain_aws import ChatBedrockConverse
+
+        return ChatBedrockConverse(
+            model=model_id,
+            region_name=settings.aws_region,
+            # Must match executor_max_workers or the two throttle each other.
+            config=Config(max_pool_connections=settings.boto_max_pool_connections),
+            **kwargs,
+        )
+
+    from langchain_anthropic import ChatAnthropic
+
+    if not settings.anthropic_api_key:
+        raise RuntimeError(
+            "LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is unset. "
+            "Set it in .env, or switch LLM_PROVIDER=bedrock."
+        )
+
+    return ChatAnthropic(
+        model=model_id,
+        api_key=settings.anthropic_api_key,
+        **kwargs,
+    )

@@ -1,0 +1,77 @@
+name: control-tower
+
+services:
+  postgres:
+    # pgvector/pgvector ships the extension prebuilt.  pg17 matches the RDS
+    # major version target (PostgreSQL 17.11+ — see ADR-005).
+    #
+    # DRIFT TO KNOW ABOUT: this tag tracks upstream pgvector (0.8.6 at time of
+    # writing) while RDS currently caps at 0.8.2.  Harmless today — HNSW and
+    # hnsw.iterative_scan exist in both — but do not reach for a feature that
+    # landed after 0.8.2 without checking it is available on RDS first, or it
+    # will work locally and fail only after deploy.
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: control_tower
+      POSTGRES_PASSWORD: control_tower
+      POSTGRES_DB: control_tower
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U control_tower -d control_tower"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      # Inside the compose network the host is the service name, not localhost.
+      DATABASE_URL: postgresql://control_tower:control_tower@postgres:5432/control_tower
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-us.anthropic.claude-opus-4-8}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      APP_ENV: local
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    # --reload for local iteration only; the image CMD is the production entrypoint.
+    command: >
+      uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      --timeout-keep-alive 305
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: dev
+    environment:
+      # Server-side only — the BFF route handler reads this at request time.
+      BACKEND_INTERNAL_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+
+volumes:
+  pgdata:
