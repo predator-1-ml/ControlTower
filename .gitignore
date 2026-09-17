@@ -42,3 +42,8 @@ terraform/environments/prod/terraform.tfvars
 .idea/
 .DS_Store
 Thumbs.db
+
+# Next.js build output that is not covered by the generic rules above
+frontend/.next/
+frontend/next-env.d.ts
+frontend/tsconfig.tsbuildinfo
