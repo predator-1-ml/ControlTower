@@ -7,11 +7,26 @@ switches, exposes task progress, and **resumes reliably across service restarts*
 Built with LangGraph (orchestration), FastAPI (backend), Next.js (frontend), and
 Terraform-provisioned AWS infrastructure on ECS Fargate.
 
-> **Status: scaffolding.** Day 1 of a one-week build. Durable execution is
-> implemented and verified; the planner, supervisor, and three workflow
-> subgraphs are not yet built. See
-> [`docs/plans/2026-09-17-feat-ai-operations-control-tower-plan.md`](docs/plans/2026-09-17-feat-ai-operations-control-tower-plan.md)
-> for the full design and the day-by-day build order.
+## What is built
+
+| | |
+|---|---|
+| **Orchestration** | Planner → supervisor → three workflow subgraphs → compose |
+| **Workflows** | Onboarding (deterministic), Claims (tool-driven), Knowledge (RAG) |
+| **Durability** | Postgres checkpointing; workflows resume after the process dies |
+| **API** | SSE streaming, session reconnect |
+| **Frontend** | Chat, live plan DAG, activity log |
+| **Infrastructure** | Terraform: VPC, 2 ALBs, ECS Fargate, RDS+pgvector, Route 53 private zone |
+| **CI/CD** | 5 GitHub Actions workflows, OIDC, no long-lived keys |
+
+**54 tests · ruff clean · typecheck clean · `terraform validate` clean across 8 stacks ·
+both Docker images build and run**
+
+Verified rather than asserted: durable execution across real process death, and
+the full container-to-container path over the private DNS name the Route 53 zone
+serves.
+
+Not yet deployed to AWS — see [Deploying](#deploying).
 
 ---
 
@@ -20,9 +35,22 @@ Terraform-provisioned AWS infrastructure on ECS Fargate.
 ```bash
 make setup      # create the venv, install backend deps
 make up         # start Postgres (pgvector) in Docker
-make migrate    # create checkpointer tables (advisory-locked, single process)
-make test       # 20 tests
+make migrate    # domain schema + checkpointer tables (advisory-locked)
+make seed       # demo fixtures
+make test       # unit tests (no database needed)
+make test-db    # + integration tests against Postgres
 ```
+
+Then run it:
+
+```bash
+make dev                      # backend on :8000
+cd frontend && npm run dev    # frontend on :3000
+```
+
+Needs an LLM credential: either `ANTHROPIC_API_KEY` in `backend/.env`, or
+`LLM_PROVIDER=bedrock` with a current `aws login` session. The tests and
+`make verify-resume` need neither.
 
 ### Prove durable execution
 
@@ -107,12 +135,43 @@ fails as `PoolTimeout`, which looks like Postgres is down when it isn't.
 **Python 3.12, not 3.13** — some LangGraph/psycopg extras still lag on 3.13 wheels.
 
 **LLM provider:** defaults to the Anthropic API locally (natively async, no AWS
-model-access gating). Set `LLM_PROVIDER=bedrock` for the AWS path. Note the model
-id differs by client — `ChatBedrockConverse` requires a geo inference-profile
-prefix (`us.anthropic.claude-opus-4-8`); the bare id is rejected.
+model-access gating). Set `LLM_PROVIDER=bedrock` for the AWS path.
+
+Two Bedrock details that cost time if unknown:
+
+- **Model IDs need an inference-profile prefix, and it is regional.** In
+  `ap-southeast-1` every current model is `global.`-prefixed
+  (`global.anthropic.claude-sonnet-4-6`); `apac.` covers only legacy models and
+  `us.` does not resolve at all. Check with
+  `aws bedrock list-inference-profiles` — never guess.
+- **Opus is not invocable on a fresh AWS account.** Bedrock returns *"not
+  available for this account"* for Opus 4.8 and Sonnet 5. Production therefore
+  uses Sonnet 4.6; local dev keeps Opus via the Anthropic API. This divergence is
+  what the provider abstraction exists for.
 
 Copy `.env.example` to `.env` and fill in `ANTHROPIC_API_KEY` to exercise the LLM
 paths. The tests and `make verify-resume` need no API key.
+
+---
+
+## Deploying
+
+```bash
+export AWS_PROFILE=<your-profile>
+
+cd terraform/bootstrap      && terraform init && terraform apply   # state bucket, once
+cd ../environments/dev      && terraform init && terraform apply
+terraform output                                                   # role ARNs, subnet ids
+```
+
+Set the five repository variables from those outputs (listed in
+[`docs/ci-cd.md`](docs/ci-cd.md)), then push to `main` — the deploy workflows take
+over from there.
+
+Roughly **$4.40/day** in `ap-southeast-1`. Intended lifecycle is deploy → record
+the demo → `terraform destroy`.
+
+See [`docs/demo.md`](docs/demo.md) for the three-beat walkthrough.
 
 ---
 
@@ -120,10 +179,19 @@ paths. The tests and `make verify-resume` need no API key.
 
 | Document | Covers |
 |---|---|
-| `docs/plans/2026-09-17-...-plan.md` | Full design, ADRs, build order, risks |
-| `docs/architecture.md` | Solution architecture |
-| `docs/langgraph-design.md` | Graph topology, planner/supervisor, subgraphs |
-| `docs/state-management.md` | State schema, reducers, checkpointing, resume |
-| `docs/networking.md` | Network topology, private communication, alternatives |
-| `docs/terraform.md` · `docs/ecs.md` · `docs/ci-cd.md` | Infrastructure |
-| `docs/assumptions.md` · `docs/tradeoffs.md` · `docs/future-improvements.md` | Decisions and their costs |
+| [`architecture.md`](docs/architecture.md) | Solution architecture, AWS architecture |
+| [`langgraph-design.md`](docs/langgraph-design.md) | Graph topology, orchestration, where the LLM is and is not |
+| [`state-management.md`](docs/state-management.md) | Reducers, checkpointing, resume, schema versioning |
+| [`networking.md`](docs/networking.md) | **Private communication, alternatives, tradeoffs** |
+| [`ecs.md`](docs/ecs.md) | Task definitions, roles, shutdown timing |
+| [`terraform.md`](docs/terraform.md) | Modules, state, promotion path |
+| [`ci-cd.md`](docs/ci-cd.md) | Pipelines, OIDC, the Terraform/CI boundary |
+| [`assumptions.md`](docs/assumptions.md) | What was assumed, and what was deliberately not built |
+| [`tradeoffs.md`](docs/tradeoffs.md) | Every decision with its cost stated |
+| [`future-improvements.md`](docs/future-improvements.md) | Ordered by what I would do first |
+| [`demo.md`](docs/demo.md) | Three-beat walkthrough |
+| [`plans/`](docs/plans/) | Original design plans and ADRs |
+
+If you read one, read [`networking.md`](docs/networking.md) — it covers the
+Additional Challenge and the reasoning behind the only architecturally unusual
+decision in the system.
