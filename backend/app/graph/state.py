@@ -249,6 +249,32 @@ def ready_tasks(plan: list[PlanTask]) -> list[PlanTask]:
     ]
 
 
+def running_task(plan: list[PlanTask], workflow: WorkflowName) -> PlanTask | None:
+    """The task a workflow subgraph is currently executing.
+
+    The supervisor marks exactly one task RUNNING before routing, so a subgraph
+    does not need to be told which task it is working on — it reads it back out
+    of shared state. That keeps the subgraphs addable as plain nodes with no
+    wrapper to translate inputs.
+    """
+    for task in plan:
+        if task.workflow == workflow and task.status is TaskStatus.RUNNING:
+            return task
+    return None
+
+
+def task_delta(task: PlanTask, **changes: Any) -> list[PlanTask]:
+    """Build the single-task plan update a node should return.
+
+    Use this instead of hand-building a list. It enforces the `merge_tasks`
+    contract — return ONLY the task you changed — at the one place where it is
+    easy to get wrong, so a node cannot accidentally hand back a whole stale plan.
+
+        return {"plan": task_delta(task, status=TaskStatus.DONE)}
+    """
+    return [task.model_copy(update=changes)]
+
+
 def is_plan_complete(plan: list[PlanTask]) -> bool:
     """True when no task can make further progress.
 

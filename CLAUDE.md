@@ -121,6 +121,16 @@ ECS tasks booting against a stale schema crash on `UniqueViolation` and can leav
 an `INVALID` index. Migrations run as one advisory-locked process, never at app
 startup.
 
+**Custom types in checkpointed state must be registered for msgpack.**
+`PlanTask` and `TaskStatus` are listed in `ALLOWED_MSGPACK_MODULES`. Unregistered
+types warn today and will be *blocked* later — and blocking does not raise, it
+returns the raw dict, so `task.status` fails far from the cause. Add any new
+custom type that enters state to that list.
+
+**That warning goes through `logging`, not `warnings`.** A test built on
+`recwarn` silently guards nothing; use `caplog`. Verified by removing the fix and
+watching the test still pass.
+
 **`ChatBedrockConverse` has no native async.** `ainvoke`/`astream` bridge blocking
 boto3 onto a thread pool, holding a thread for the whole call including a streamed
 response. Raise `executor_max_workers` **and** `boto_max_pool_connections`

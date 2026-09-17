@@ -60,6 +60,23 @@ async def open_pool(settings: Settings | None = None) -> AsyncConnectionPool:
     return pool
 
 
+#: Custom types that appear inside checkpointed graph state.
+#:
+#: LangGraph serialises state with msgpack and, on load, warns about any type it
+#: was not told to expect: "Deserializing unregistered type ... This will be
+#: blocked in a future version."
+#:
+#: The failure mode once it IS blocked is the dangerous part — it does not raise.
+#: It logs, then hands back the raw dict. A node expecting a PlanTask gets a
+#: plain dict, so `task.status` raises AttributeError somewhere far from the
+#: cause, or a `.get()` quietly takes the wrong branch. Registering the types
+#: explicitly turns a future silent-wrong into a non-event.
+ALLOWED_MSGPACK_MODULES = [
+    ("app.graph.state", "PlanTask"),
+    ("app.graph.state", "TaskStatus"),
+]
+
+
 def build_checkpointer(pool: AsyncConnectionPool):
     """Build the saver from an open pool.
 
@@ -76,5 +93,9 @@ def build_checkpointer(pool: AsyncConnectionPool):
     Note we deliberately do NOT call ``.setup()`` here. See ``app/scripts/migrate.py``.
     """
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
-    return AsyncPostgresSaver(conn=pool)
+    return AsyncPostgresSaver(
+        conn=pool,
+        serde=JsonPlusSerializer(allowed_msgpack_modules=ALLOWED_MSGPACK_MODULES),
+    )
