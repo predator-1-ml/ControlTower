@@ -1,25 +1,25 @@
-"""One-off migration entrypoint. Run as a standalone ECS task BEFORE the service update.
+"""Migration entrypoint. Run as a standalone ECS task BEFORE the service update.
 
-Why this is a separate process rather than something the app does at startup:
+Applies, in one advisory-locked process:
+  1. numbered .sql files in backend/migrations/  (domain schema)
+  2. AsyncPostgresSaver.setup()                  (LangGraph checkpointer tables)
 
-`AsyncPostgresSaver.setup()` has a concurrency hazard that is not documented. It
-holds no advisory lock, does no SELECT ... FOR UPDATE, and cannot be wrapped in a
-transaction (its migrations use CREATE INDEX CONCURRENTLY, which Postgres forbids
-inside one). It reads MAX(v) from `checkpoint_migrations` and applies the tail.
+Why a separate process rather than something the app does at startup:
 
-So if N ECS tasks boot simultaneously against a stale schema:
+`setup()` holds no advisory lock, does no SELECT ... FOR UPDATE, and cannot be
+wrapped in a transaction (its own migrations use CREATE INDEX CONCURRENTLY,
+which Postgres forbids inside one). It reads MAX(v) from `checkpoint_migrations`
+and applies the tail. So if N ECS tasks boot at once against a stale schema:
 
-  * All read version = k, all apply k+1..n, all INSERT the same version rows.
-    Losers hit a UniqueViolation on the primary key and **crash at boot**.
-  * Two concurrent CREATE INDEX CONCURRENTLY on the same table can abort, leaving
-    an INVALID index behind. Symptom: queries quietly stop using it.
-    Detect with:  SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid;
+  * All read version k, all apply k+1..n, all INSERT the same rows. Losers hit a
+    UniqueViolation and **crash at boot**.
+  * Two concurrent CREATE INDEX CONCURRENTLY on one table can abort, leaving an
+    INVALID index. Queries then quietly stop using it. Detect with:
+        SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid;
 
-The window is only open on the first boot after a checkpointer upgrade that adds
-a migration — which is exactly the rolling-deploy moment. Running setup() in the
-app lifespan works fine right up until the deploy where it doesn't.
-
-Fix: one process, one advisory lock, before any app task starts.
+That window opens on the first boot after a checkpointer upgrade — exactly the
+rolling-deploy moment. Running setup() in the app lifespan works right up until
+the deploy where it doesn't.
 
 Usage:
     python -m app.scripts.migrate
@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from pathlib import Path
 
 from app.core.config import get_settings
 from app.core.eventloop import use_compatible_event_loop
@@ -37,34 +38,64 @@ from app.db.checkpointer import open_pool
 
 log = logging.getLogger("migrate")
 
-#: Arbitrary but stable. Any process taking this lock serializes against the others.
-LOCK_KEY = "langgraph_checkpoint_setup"
+MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
+
+#: Arbitrary but stable. Any process taking this lock serializes against the rest.
+LOCK_KEY = "control_tower_migrations"
+
+_TRACKING_TABLE = """
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version    text PRIMARY KEY,
+    applied_at timestamptz NOT NULL DEFAULT now()
+)
+"""
+
+
+async def _apply_sql_migrations(conn) -> None:
+    """Apply any .sql file not yet recorded, in filename order."""
+    await conn.execute(_TRACKING_TABLE)
+
+    rows = await (await conn.execute("SELECT version FROM schema_migrations")).fetchall()
+    applied = {r["version"] for r in rows}
+
+    for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        version = path.stem
+        if version in applied:
+            continue
+        log.info("applying %s", version)
+        # The pool runs autocommit (the checkpointer requires it), so wrap each
+        # migration explicitly: a file either lands whole or not at all.
+        async with conn.transaction():
+            # prepare=False forces the simple query protocol. psycopg defaults to
+            # the extended protocol, which accepts exactly one statement per
+            # execute — a multi-statement file fails with the misleading
+            # "cannot insert multiple commands into a prepared statement".
+            await conn.execute(path.read_text(encoding="utf-8"), prepare=False)
+            await conn.execute(
+                "INSERT INTO schema_migrations (version) VALUES (%s)", (version,)
+            )
+
+    if not applied:
+        log.info("domain schema created")
 
 
 async def run_migrations() -> None:
-    settings = get_settings()
-    pool = await open_pool(settings)
-
+    pool = await open_pool(get_settings())
     try:
         async with pool.connection() as conn:
             log.info("acquiring advisory lock %s", LOCK_KEY)
-            # Blocks (rather than failing) if another migration task holds it,
-            # so a retried ECS task waits instead of racing.
+            # Blocks rather than failing, so a retried ECS task waits its turn
+            # instead of racing.
             await conn.execute("SELECT pg_advisory_lock(hashtext(%s))", (LOCK_KEY,))
             try:
+                await _apply_sql_migrations(conn)
+
                 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-                log.info("running checkpointer setup")
                 await AsyncPostgresSaver(conn=conn).setup()
-
-                # Domain schema (pgvector extension + tables) is Alembic's job and
-                # runs under the same lock, so the two can never interleave.
-                # TODO(day-1): await _run_alembic_upgrade()
                 log.info("checkpointer setup complete")
             finally:
-                await conn.execute(
-                    "SELECT pg_advisory_unlock(hashtext(%s))", (LOCK_KEY,)
-                )
+                await conn.execute("SELECT pg_advisory_unlock(hashtext(%s))", (LOCK_KEY,))
                 log.info("released advisory lock")
     finally:
         await pool.close()

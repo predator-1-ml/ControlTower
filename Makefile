@@ -6,7 +6,7 @@ BACKEND := backend
 PY      := $(BACKEND)/.venv/Scripts/python.exe   # POSIX venvs: .venv/bin/python
 
 .DEFAULT_GOAL := help
-.PHONY: help setup up down logs migrate test lint fmt verify-resume clean
+.PHONY: help setup up down logs migrate seed test test-db lint fmt verify-resume clean
 
 help: ## Show available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -27,8 +27,14 @@ logs: ## Tail service logs
 migrate: ## Run checkpointer + domain migrations (advisory-locked, single process)
 	cd $(BACKEND) && .venv/Scripts/python.exe -m app.scripts.migrate
 
-test: ## Run the test suite
+seed: ## Load demo fixtures (safe to re-run; truncates first)
+	docker compose exec -T postgres psql -U control_tower -d control_tower -v ON_ERROR_STOP=1 -q < data/seed/seed.sql
+
+test: ## Run unit tests (no database needed)
 	cd $(BACKEND) && .venv/Scripts/python.exe -m pytest tests/ -q
+
+test-db: ## Run all tests including integration (needs: up, migrate, seed)
+	cd $(BACKEND) && CONTROL_TOWER_DB_TESTS=1 .venv/Scripts/python.exe -m pytest tests/ -q
 
 lint: ## Lint and type-check
 	cd $(BACKEND) && .venv/Scripts/python.exe -m ruff check app tests
