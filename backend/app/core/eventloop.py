@@ -24,8 +24,22 @@ import sys
 def use_compatible_event_loop() -> None:
     """Select an event loop psycopg can use. No-op off Windows.
 
-    Must be called BEFORE the loop is created — i.e. before `asyncio.run()`, and
-    at import time for anything uvicorn will start.
+    Must be called BEFORE the loop is created — i.e. before `asyncio.run()`.
+
+    ⚠️ **This does not reach uvicorn.** Uvicorn does not consult the event-loop
+    policy; it returns a loop *factory* directly::
+
+        # uvicorn/loops/asyncio.py
+        if sys.platform == "win32" and not use_subprocess:
+            return asyncio.ProactorEventLoop
+
+    So a native `uvicorn app.main:app` on Windows always gets ProactorEventLoop
+    and dies at startup with `PoolTimeout`, no matter what is set here.
+
+    Note the inverse in that condition: with a subprocess it returns
+    SelectorEventLoop — so **`uvicorn --reload` works**, which is what local dev
+    wants anyway (`make dev`). Irrelevant in the container and on ECS, where
+    SelectorEventLoop is already the default.
     """
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())

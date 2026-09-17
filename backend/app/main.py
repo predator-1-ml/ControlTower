@@ -5,8 +5,7 @@ Everything expensive and loop-bound is built in the lifespan, not at import:
   * `AsyncPostgresSaver.__init__` captures the running event loop, so building it
     at module scope raises `RuntimeError: no running event loop`.
   * The graph must be compiled *with* that checkpointer, so it is loop-bound too.
-  * The executor widening in ADR-004 must happen on the loop that will serve
-    requests.
+  * The executor widening in ADR-004 must happen on the loop that serves requests.
 
 Consequence worth stating plainly: there is no importable module-level `graph`.
 Handlers read `request.app.state.graph`.
@@ -19,17 +18,40 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.chat import router as chat_router
 from app.core.config import get_settings
 from app.core.eventloop import use_compatible_event_loop
 from app.db.checkpointer import build_checkpointer, open_pool
-from app.graph.smoke import build_smoke_graph
-from app.llm.provider import configure_event_loop_executor
+from app.graph.build import build_graph
+from app.graph.deps import Deps
+from app.llm.provider import configure_event_loop_executor, get_chat_model
 
 # Must run at import time, before uvicorn creates its event loop. Only affects
 # native Windows dev runs; a no-op in the container and on ECS.
 use_compatible_event_loop()
 
 log = logging.getLogger("app")
+
+
+def _build_embedder(settings):
+    """Embeddings are optional: only the knowledge workflow needs them.
+
+    A missing or misconfigured embedder must degrade to "no policy matched"
+    rather than taking down onboarding and claims with it, so this never raises.
+    """
+    if settings.llm_provider != "bedrock":
+        log.info("no embedder configured (provider=%s); knowledge workflow will not retrieve",
+                 settings.llm_provider)
+        return None
+    try:
+        from langchain_aws import BedrockEmbeddings
+
+        return BedrockEmbeddings(
+            model_id=settings.embedding_model_id, region_name=settings.aws_region
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("embedder unavailable: %s", exc)
+        return None
 
 
 @asynccontextmanager
@@ -48,8 +70,12 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.pool = pool
     app.state.checkpointer = checkpointer
-    # Day 1: the smoke graph. Replaced by the planner/supervisor graph on Day 4.
-    app.state.graph = build_smoke_graph(checkpointer)
+    app.state.deps = Deps(
+        pool=pool,
+        model=get_chat_model(settings=settings),
+        embedder=_build_embedder(settings),
+    )
+    app.state.graph = build_graph(checkpointer)
 
     log.info("startup complete (provider=%s)", settings.llm_provider)
     try:
@@ -60,6 +86,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AI Operations Control Tower", lifespan=lifespan)
+app.include_router(chat_router)
 
 
 @app.get("/health")

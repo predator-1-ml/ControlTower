@@ -27,6 +27,16 @@ logs: ## Tail service logs
 migrate: ## Run checkpointer + domain migrations (advisory-locked, single process)
 	cd $(BACKEND) && .venv/Scripts/python.exe -m app.scripts.migrate
 
+dev: ## Run the backend locally on :8000
+	# --reload is REQUIRED on Windows, not just convenient: uvicorn returns
+	# ProactorEventLoop unless it is using a subprocess, and psycopg's async mode
+	# cannot use it. Without --reload the app dies at startup with PoolTimeout.
+	cd $(BACKEND) && .venv/Scripts/python.exe -m uvicorn app.main:app \
+		--host 127.0.0.1 --port 8000 --reload --timeout-keep-alive 305
+
+ingest: ## Embed knowledge chunks (needs live AWS credentials)
+	cd $(BACKEND) && .venv/Scripts/python.exe -m app.scripts.ingest
+
 seed: ## Load demo fixtures (safe to re-run; truncates first)
 	docker compose exec -T postgres psql -U control_tower -d control_tower -v ON_ERROR_STOP=1 -q < data/seed/seed.sql
 

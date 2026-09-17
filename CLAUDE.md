@@ -112,6 +112,17 @@ correctly" is not evidence checkpointing works — only a resume is.
 fixes it; it must be called before the loop is created, which is why
 `tests/conftest.py` exists. No-op on Linux.
 
+**…and that shim does not reach uvicorn.** Uvicorn ignores the loop policy and
+returns a loop *factory*: `ProactorEventLoop` on Windows unless it is using a
+subprocess. So `make dev` uses `--reload` out of necessity, not convenience —
+without it the app dies at startup with `PoolTimeout`.
+
+**Interrupts arrive on the `updates` stream channel, keyed `__interrupt__`** —
+not on `values`, and the value is a *tuple*, not a state dict. An
+`isinstance(update, dict)` guard swallows them silently: the graph pauses, the
+stream just ends, and the user waits for a question that was never sent. Pinned
+by `test_onboarding_interrupt_reaches_the_client`.
+
 **`conn.execute()` takes one statement.** Multi-statement SQL files need
 `prepare=False` (simple query protocol), or you get "cannot insert multiple
 commands into a prepared statement".

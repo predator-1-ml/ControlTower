@@ -52,6 +52,9 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.25",
     "httpx>=0.28",
+    # Runs the FastAPI lifespan in tests, so API tests exercise the real
+    # pool/graph/checkpointer wiring rather than a hand-assembled substitute.
+    "asgi-lifespan>=2.1",
     "ruff>=0.9",
     "mypy>=1.14",
 ]
