@@ -19,8 +19,8 @@ Terraform-provisioned AWS infrastructure on ECS Fargate.
 | **Infrastructure** | Terraform: VPC, 2 ALBs, ECS Fargate, RDS+pgvector, Route 53 private zone |
 | **CI/CD** | 5 GitHub Actions workflows, OIDC, no long-lived keys |
 
-**54 tests · ruff clean · typecheck clean · `terraform validate` clean across 8 stacks ·
-both Docker images build and run**
+**66 tests (46 without a database) · ruff clean · typecheck clean ·
+`terraform validate` clean across 8 stacks · both Docker images build and run**
 
 Verified rather than asserted: durable execution across real process death, and
 the full container-to-container path over the private DNS name the Route 53 zone
@@ -51,6 +51,11 @@ cd frontend && npm run dev    # frontend on :3000
 Needs an LLM credential: either `ANTHROPIC_API_KEY` in `backend/.env`, or
 `LLM_PROVIDER=bedrock` with a current `aws login` session. The tests and
 `make verify-resume` need neither.
+
+The knowledge workflow additionally needs its corpus embedded — `make ingest`.
+That uses `cohere.embed-english-v3` on Bedrock and therefore needs AWS
+credentials locally too — deliberately, so local retrieval behaves exactly like
+production instead of against a second, incompatible vector space.
 
 ### Prove durable execution
 
@@ -139,15 +144,18 @@ model-access gating). Set `LLM_PROVIDER=bedrock` for the AWS path.
 
 Two Bedrock details that cost time if unknown:
 
-- **Model IDs need an inference-profile prefix, and it is regional.** In
-  `ap-southeast-1` every current model is `global.`-prefixed
-  (`global.anthropic.claude-sonnet-4-6`); `apac.` covers only legacy models and
-  `us.` does not resolve at all. Check with
+- **Model IDs need an inference-profile prefix, and it is per-model, not
+  regional.** In `ap-southeast-1` Nova is `apac.`-prefixed
+  (`apac.amazon.nova-pro-v1:0`) while Claude is `global.`-prefixed — and
+  `nova-2-lite` is `global.` too. `us.` does not resolve at all. The bare id is
+  rejected for on-demand throughput. Check with
   `aws bedrock list-inference-profiles` — never guess.
-- **Opus is not invocable on a fresh AWS account.** Bedrock returns *"not
-  available for this account"* for Opus 4.8 and Sonnet 5. Production therefore
-  uses Sonnet 4.6; local dev keeps Opus via the Anthropic API. This divergence is
-  what the provider abstraction exists for.
+- **No Anthropic model is invocable on a fresh AWS account.** Bedrock gates them
+  all behind an account-level *"Anthropic use case details"* form and returns
+  `ResourceNotFoundException` until it is submitted. Production therefore runs
+  `apac.amazon.nova-pro-v1:0`, which needs no form; local dev keeps Claude via the
+  Anthropic API. This divergence is what the provider abstraction exists for, and
+  moving back to Claude once the form clears is one config value.
 
 Copy `.env.example` to `.env` and fill in `ANTHROPIC_API_KEY` to exercise the LLM
 paths. The tests and `make verify-resume` need no API key.

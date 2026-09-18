@@ -48,9 +48,11 @@ validate a certificate. The listener block exists to show where TLS terminates.
 
 ## Model availability
 
-**Bedrock serves Sonnet 4.6, not Opus.** Verified by direct invocation: Opus 4.8
-and Sonnet 5 both return *"not available for this account"* — a fresh AWS account
-does not get the newest models without contacting AWS Sales.
+**Bedrock serves Nova Pro, not Claude.** Verified by direct invocation: every
+Anthropic model returns `ResourceNotFoundException: Model use case details have
+not been submitted for this account` — an account-level form in the Bedrock
+console, not per-model access. Nova Pro needs no form; the whole graph is verified
+on it, and switching to Claude afterwards is one config value.
 
 **Embeddings are Cohere, not Titan.** Amazon Titan embeddings are not offered in
 ap-southeast-1. `cohere.embed-english-v3` is 1024-dimensional (verified, and

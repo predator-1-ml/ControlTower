@@ -55,9 +55,14 @@ variable "db_instance_class" {
 }
 
 variable "bedrock_model_id" {
-  description = "Inference profile id. The prefix is REGIONAL: ap-southeast-1 needs global., not us."
+  # Nova, not Claude: every Anthropic model on this account is gated behind an
+  # account-level use-case form and fails with ResourceNotFoundException until
+  # it is submitted (probed 2026-09-18; see CLAUDE.md). This value reaches the
+  # task as an env var, which OVERRIDES the app's own default — so a stale id
+  # here breaks chat in the deployed stack even when the code is right.
+  description = "Inference profile id. The prefix is per-model: Nova is apac., Claude is global.; us. does not resolve in ap-southeast-1."
   type        = string
-  default     = "global.anthropic.claude-sonnet-4-6"
+  default     = "apac.amazon.nova-pro-v1:0"
 }
 
 variable "embedding_model_id" {

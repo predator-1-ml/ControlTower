@@ -11,6 +11,9 @@ services:
     # landed after 0.8.2 without checking it is available on RDS first, or it
     # will work locally and fail only after deploy.
     image: pgvector/pgvector:pg17
+    # Restart on failure, but stay down if you explicitly `docker compose stop`.
+    # `always` would fight you every time you try to stop a service by hand.
+    restart: unless-stopped
     environment:
       POSTGRES_USER: control_tower
       POSTGRES_PASSWORD: control_tower
@@ -29,6 +32,10 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    # The backend hard-fails at startup if Postgres is unreachable (see
+    # app/main.py). depends_on handles the FIRST start, but not the case where
+    # Postgres restarts later and takes the backend down with it — this does.
+    restart: unless-stopped
     # backend/.env is the single source of truth for local provider choice and
     # secrets. It is gitignored, and putting keys there keeps them off the
     # command line and out of shell history.
@@ -57,9 +64,17 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
-      # Host AWS credentials, read-only. Local dev only — on ECS the task role
-      # supplies credentials and there is no file to mount.
-      - ${USERPROFILE:-${HOME}}/.aws:/home/appuser/.aws:ro
+      # Host AWS credentials. Local dev only — on ECS the task role supplies
+      # credentials and there is no file to mount.
+      #
+      # NOT `:ro`, and that is load-bearing. The `aws login` credential provider
+      # refreshes its token mid-request and writes the new one to
+      # ~/.aws/login/cache. Read-only surfaces as
+      #   [Errno 30] Read-only file system: '/home/appuser/.aws/login/cache/tmp...'
+      # from inside a graph node — it reads like a Bedrock failure, not a mount
+      # one, and only appears once the first token expires, so it passes every
+      # test you run in the first hour.
+      - ${USERPROFILE:-${HOME}}/.aws:/home/appuser/.aws
     # --reload for local iteration only; the image CMD is the production entrypoint.
     command: >
       uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -76,6 +91,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       target: dev
+    restart: unless-stopped
     environment:
       # Server-side only — the BFF route handler reads this at request time.
       BACKEND_INTERNAL_URL: http://backend:8000

@@ -47,11 +47,24 @@ class Settings(BaseSettings):
     #   aws bedrock list-inference-profiles --region <region> \
     #     --query "inferenceProfileSummaries[].inferenceProfileId"
     #
-    # Sonnet 4.6 rather than Opus 4.8 because Opus 4.8 and Sonnet 5 are both
-    # "not available for this account" on Bedrock here — a fresh account does not
-    # get the newest models without contacting AWS Sales. Probed directly; see
-    # CLAUDE.md. This is an availability constraint, not a cost decision.
-    bedrock_model_id: str = "global.anthropic.claude-sonnet-4-6"
+    # Nova Pro, not Claude, and that is an availability constraint rather than a
+    # preference. Probed 2026-09-18: EVERY Anthropic model on Bedrock in this
+    # account returns
+    #
+    #   ResourceNotFoundException: Model use case details have not been
+    #   submitted for this account.
+    #
+    # — an account-level questionnaire in the Bedrock console, not per-model
+    # access and not a quota. Nova needs no such form and invokes today, and the
+    # full graph (planning, dependencies, interrupt, RAG) is verified on it.
+    #
+    # Note the `apac.` prefix: Nova's bare model id is rejected for on-demand
+    # throughput, and `global.` resolves only for `nova-2-lite` here.
+    #
+    # Once the form clears, this line becomes
+    # "global.anthropic.claude-sonnet-4-6" and nothing else changes. That the
+    # swap is one config value is the entire point of the provider abstraction.
+    bedrock_model_id: str = "apac.amazon.nova-pro-v1:0"
 
     # Local dev goes through the Anthropic API, which has no such restriction,
     # so it keeps the stronger model. This divergence is exactly what the
@@ -61,6 +74,7 @@ class Settings(BaseSettings):
     # RAG embeddings. Amazon Titan is not offered in ap-southeast-1; Cohere is.
     # 1024 dimensions, matching the vector(1024) column in migration 0001.
     embedding_model_id: str = "cohere.embed-english-v3"
+
 
     # Optional cheaper tiers for the two highest-frequency nodes. Empty = use
     # the main model. Planner and supervisor are structured-output calls made on
@@ -87,6 +101,7 @@ class Settings(BaseSettings):
     @property
     def is_local(self) -> bool:
         return self.app_env == "local"
+
 
 
 @lru_cache

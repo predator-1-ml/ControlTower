@@ -63,8 +63,8 @@ deliberately — but it is a convention, not a compiler guarantee.
 
 ### Bedrock in prod, Anthropic API in dev
 **Gained:** fast local iteration with no AWS gating; an AWS-native production
-story; and it absorbed a genuine constraint — Opus is not invocable on this
-account.
+story; and it absorbed a genuine constraint — no Anthropic model is invocable on
+this account until a use-case form is approved, so production runs Nova Pro.
 **Cost:** two providers to keep working, and dev exercises a different model than
 prod. Meaningful behaviour differences would be found late.
 

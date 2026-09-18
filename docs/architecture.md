@@ -101,18 +101,26 @@ Graph code never imports a concrete model class; it calls `get_chat_model()`.
 | Environment | Provider | Model |
 |---|---|---|
 | Local dev | Anthropic API | `claude-opus-4-8` |
-| Production | Bedrock | `global.anthropic.claude-sonnet-4-6` |
+| Production | Bedrock | `apac.amazon.nova-pro-v1:0` |
+| Embeddings, everywhere | Bedrock | `cohere.embed-english-v3` |
 
-The split is not stylistic. **Opus 4.8 and Sonnet 5 are not invocable on this AWS
-account** — Bedrock returns *"not available for this account… contact AWS Sales"*
-for a fresh account. Sonnet 4.6 is verified working. The abstraction earned its
-place on day one.
+The split is not stylistic. **No Anthropic model is invocable on this AWS
+account**: Bedrock gates them all behind an account-level use-case form and
+returns `ResourceNotFoundException` until it is submitted. Nova Pro needs no form,
+and the full graph — planning, dependencies, interrupt and resume, RAG — is
+verified on it. Moving to Claude once the form clears is one config value. The
+abstraction earned its place on day one.
+
+Embeddings are deliberately *not* tied to the chat provider: they are Cohere on
+Bedrock in local development as well as production, so there is one vector space
+everywhere and local retrieval exercises the vectors production uses.
 
 Two Bedrock details that cost time if unknown:
 
-- **Model IDs need an inference-profile prefix, and it is regional.** In
-  ap-southeast-1, `apac.` covers only legacy models and every current model is
-  `global.`-prefixed. `us.` does not resolve at all.
+- **Model IDs need an inference-profile prefix, and it is per-model.** In
+  ap-southeast-1 Nova is `apac.`-prefixed while Claude is `global.`-prefixed;
+  `us.` does not resolve at all, and the bare id is rejected. List them with
+  `aws bedrock list-inference-profiles` rather than guessing.
 - **`ChatBedrockConverse` has no native async.** `ainvoke`/`astream` bridge
   blocking boto3 onto a thread pool, holding a thread for the whole call including
   a streamed response. The default executor caps at `min(32, cpu_count + 4)`, so

@@ -147,12 +147,33 @@ boto3 onto a thread pool, holding a thread for the whole call including a stream
 response. Raise `executor_max_workers` **and** `boto_max_pool_connections`
 together, or the bottleneck just moves.
 
-**Bedrock needs an inference-profile ID, and the prefix is regional.** The bare
-model ID is rejected for on-demand throughput. Verified in `ap-southeast-1`:
-`apac.` profiles exist only for older models; every current model is
-`global.`-prefixed (`global.anthropic.claude-opus-4-8`). `us.` does not resolve
-there. Never assume the prefix — run
+**Bedrock needs an inference-profile ID, and the prefix is per-model.** The bare
+model ID is rejected for on-demand throughput. Verified in `ap-southeast-1`: Nova
+is `apac.`-prefixed (`apac.amazon.nova-pro-v1:0`), Claude is `global.`-prefixed,
+and `nova-2-lite` is `global.` too. `us.` does not resolve there. Never assume the prefix — run
 `aws bedrock list-inference-profiles --region <region>`.
+
+**`aws login` refresh tokens are SINGLE USE — do not share the cache.**
+`docker-compose` mounts the host `~/.aws` into the backend. When the token
+expires, host and container each try to refresh it; the first consumes the grant
+and the second gets
+
+    ValidationException: The provided authorization grant is invalid, expired,
+    revoked, or malformed
+
+and — this is the painful part — **the host session is dead too**, requiring a
+fresh `aws login`. Do not run host tooling and the container against the same
+profile at the same time.
+
+**That mount must NOT be `:ro`.** The login provider writes its refreshed token
+to `~/.aws/login/cache`. Read-only surfaces mid-request as
+
+    [Errno 30] Read-only file system: '/home/appuser/.aws/login/cache/tmp...'
+
+raised from inside a graph node, so it reads as a Bedrock failure rather than a
+mount one — and it only appears after the first token expires, so it passes every
+test run in the first hour. On ECS none of this applies: the task role supplies
+credentials and there is no file to mount.
 
 **AWS account: `187880375508`, region `ap-southeast-1`, profile `Nyomad`.**
 Terraform needs `AWS_PROFILE=Nyomad` in the environment. Deliberately NOT
@@ -162,22 +183,49 @@ OIDC and has no profile.
 **Bedrock model access, probed directly on 2026-09-17.** Listing a model does not
 mean you can invoke it — always test with a real `converse` call:
 
+**Re-probed 2026-09-18 and the Anthropic row CHANGED — every Anthropic model is
+now blocked.** Trust the date, not the memory; re-probe before relying on it.
+
 | Model | Invocable? |
 |---|---|
-| `global.anthropic.claude-opus-4-8` | ❌ "not available for this account" |
-| `global.anthropic.claude-sonnet-5` | ❌ same |
-| `global.anthropic.claude-sonnet-4-6` | ✅ **what prod uses** |
-| `global.anthropic.claude-haiku-4-5-20251001-v1:0` | ✅ |
-| `apac.*` legacy profiles | ❌ blocked as Legacy + unused |
-| `cohere.embed-english-v3` | ✅ **what RAG uses** |
+| `apac.amazon.nova-pro-v1:0` | ✅ **what prod uses**, full graph verified on it |
+| `apac.amazon.nova-lite` / `nova-micro` | ✅ |
+| `global.amazon.nova-2-lite-v1:0` | ✅ |
+| `cohere.embed-english-v3` | ✅ **what RAG uses**, 1024-dim |
+| `cohere.embed-multilingual-v3` | ✅ also 1024-dim |
+| Every `anthropic.*` id — Claude 3.5, 4.x, 5.x, `apac.` and `global.` | ❌ use-case form |
+| `global.openai.*`, `global.xai.*` | ❌ AccessDeniedException |
 
-A fresh AWS account does not get the newest models without contacting AWS Sales.
-Local dev uses Opus 4.8 via the Anthropic API, which has no such restriction —
-the divergence is exactly what the provider abstraction exists for.
+Every Anthropic id fails identically:
+
+    ResourceNotFoundException: Model use case details have not been submitted
+    for this account. Fill out the Anthropic use case details form...
+
+It is an *account-level questionnaire in the Bedrock console* — not per-model
+access, not a quota, and not fixed by changing the inference-profile prefix. Note
+the exception type: `ResourceNotFoundException` reads as "wrong model id" and
+sends you hunting prefixes, which is the wrong trail entirely.
+
+**`apac.anthropic.claude-3-5-sonnet-20241022-v2:0` answered one `converse` call
+and then failed every subsequent one**, including the immediate retry. Do not
+conclude a model works from a single green call — probe it twice.
+
+**Consequence: prod chat is Nova Pro until that form is submitted.** Swapping back
+to Sonnet 4.6 is one value in `Settings.bedrock_model_id`. Embeddings are
+unaffected, which is why `get_embeddings()` is deliberately NOT gated on
+`llm_provider` — chat and embeddings are independent choices, and here they must be.
 
 **Amazon Titan embeddings do not exist in ap-southeast-1** — only Cohere.
 `cohere.embed-english-v3` is also 1024-dimensional, so `vector(1024)` is
 unchanged, but the *reason* is region-specific.
+
+**Two 1024-dim models in one column is a silent data bug.** E5 and Cohere vectors
+insert interchangeably and cosine returns plausible numbers over unrelated
+geometry — four confident wrong chunks, cited. It does not take a deploy: flipping
+`LLM_PROVIDER` and re-running ingest used to skip already-embedded rows, stranding
+the corpus in the old space forever. `knowledge_chunks.embedding_model` (migration
+0002) is what makes it detectable; `unembedded_chunks` re-selects on mismatch and
+`search_knowledge` filters on it.
 
 **Verified in this account (2026-09-17), so do not re-derive:** 3 AZs; Fargate
 quota 30 vCPU; 5 EIPs and 5 VPCs per region; `db.t4g.micro` orderable on
