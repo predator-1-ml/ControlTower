@@ -32,13 +32,17 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import logging
 from typing import Any
 
+from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 
 from app.core.config import Settings, get_settings
 
 _Role = str  # "planner" | "supervisor" | None -> main model
+
+log = logging.getLogger(__name__)
 
 
 def message_text(response: Any) -> str:
@@ -163,3 +167,34 @@ def get_chat_model(
         api_key=settings.anthropic_api_key,
         **kwargs,
     )
+
+
+def get_embeddings(settings: Settings | None = None) -> Embeddings | None:
+    """Always Cohere on Bedrock — deliberately NOT tied to `llm_provider`.
+
+    Chat provider and embedding provider are independent choices here, and on this
+    account they have to be: Bedrock's Anthropic models are gated behind a use-case
+    form and return `ResourceNotFoundException`, while `cohere.embed-english-v3`
+    invokes fine. Coupling the two would mean either no local retrieval at all, or
+    a second local model — and a second model means a second vector space in the
+    same `vector(1024)` column, which is the failure migration 0002 exists to stop.
+
+    So: chat follows `LLM_PROVIDER`; embeddings are Cohere everywhere. Local
+    retrieval then exercises the exact vectors production uses.
+
+    Returns None rather than raising, because a missing embedder must cost the
+    knowledge workflow and nothing else. Onboarding and claims have no use for
+    vectors and must not be taken down by absent AWS credentials; `retrieve` then
+    finds nothing and the graph routes to `no_results`.
+    """
+    settings = settings or get_settings()
+
+    try:
+        from langchain_aws import BedrockEmbeddings
+
+        return BedrockEmbeddings(
+            model_id=settings.embedding_model_id, region_name=settings.aws_region
+        )
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        log.warning("Bedrock embedder unavailable: %s", exc)
+        return None

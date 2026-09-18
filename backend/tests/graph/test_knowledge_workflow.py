@@ -68,7 +68,7 @@ CHUNKS = [
 @pytest.fixture
 def search_returns(monkeypatch):
     def _set(chunks: list[dict]) -> None:
-        async def fake_search(_pool, _vector, limit=4):
+        async def fake_search(_pool, _vector, _model, limit=4):
             return chunks[:limit]
 
         monkeypatch.setattr(repository, "search_knowledge", fake_search)
@@ -91,10 +91,14 @@ def make_state(question: str | None = None):
 
 
 def deps(model: StubModel | None = None, embedder: Any = "default") -> Deps:
+    resolved = FakeEmbedder() if embedder == "default" else embedder
     return Deps(
         pool=StubPool(),
         model=model or StubModel(),
-        embedder=FakeEmbedder() if embedder == "default" else embedder,
+        embedder=resolved,
+        # Tracks the embedder: `retrieve` requires both, so leaving this set while
+        # the embedder is None would test a state the app cannot produce.
+        embedding_model="fake-1024" if resolved else None,
     )
 
 

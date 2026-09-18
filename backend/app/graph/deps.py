@@ -31,3 +31,7 @@ class Deps:
     # Only the knowledge workflow needs this, so it stays optional — the other
     # two workflows must be runnable without an embedding provider configured.
     embedder: Embeddings | None = None
+    # Which vector space `embedder` produces. Carried next to it rather than read
+    # from settings inside the node, so that a test supplying a fake embedder also
+    # supplies its identity and cannot accidentally query a real model's rows.
+    embedding_model: str | None = None

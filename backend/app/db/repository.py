@@ -93,9 +93,9 @@ async def create_application(
 
 
 async def search_knowledge(
-    pool: AsyncConnectionPool, embedding: list[float], limit: int = 4
+    pool: AsyncConnectionPool, embedding: list[float], model: str, limit: int = 4
 ) -> list[dict[str, Any]]:
-    """Nearest knowledge chunks by cosine distance.
+    """Nearest knowledge chunks by cosine distance, within one model's vector space.
 
     `<=>` is cosine distance and must pair with the `vector_cosine_ops` opclass on
     the index. If the two disagree the planner silently falls back to a sequential
@@ -104,6 +104,11 @@ async def search_knowledge(
     `embedding IS NOT NULL` matters because seed rows are inserted before they are
     embedded. Without it, un-embedded rows sort as maximally distant and pad the
     result set with irrelevant text that then gets cited.
+
+    `embedding_model = %s` matters for the same reason one layer up: a chunk
+    embedded by a *different* 1024-dimensional model is not maximally distant, it
+    is plausibly distant, which is worse. Returning nothing is a visible failure;
+    returning four wrong chunks is an invisible one. See migration 0002.
     """
     vector = "[" + ",".join(str(x) for x in embedding) + "]"
 
@@ -111,6 +116,8 @@ async def search_knowledge(
         # Without iterative_scan, a filtered HNSW query can return fewer rows than
         # requested — no error, just quietly missing results. This is the single
         # most common "pgvector is broken" report. SET LOCAL needs a transaction.
+        # Note this query is now doubly filtered, which is exactly the shape that
+        # triggers it.
         async with conn.transaction():
             await conn.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
             cur = await conn.execute(
@@ -119,31 +126,46 @@ async def search_knowledge(
                        1 - (embedding <=> %s::vector) AS similarity
                 FROM knowledge_chunks
                 WHERE embedding IS NOT NULL
+                  AND embedding_model = %s
                 ORDER BY embedding <=> %s::vector
                 LIMIT %s
                 """,
-                (vector, vector, limit),
+                (vector, model, vector, limit),
             )
             rows = await cur.fetchall()
     return [_serialise(r) for r in rows]
 
 
 async def store_embedding(
-    pool: AsyncConnectionPool, chunk_id: str, embedding: list[float]
+    pool: AsyncConnectionPool, chunk_id: str, embedding: list[float], model: str
 ) -> None:
+    """Write a vector and stamp it with the model that produced it.
+
+    The two are set in one statement on purpose: a vector whose provenance is
+    unknown is unusable, so there must be no window in which one exists without
+    the other.
+    """
     vector = "[" + ",".join(str(x) for x in embedding) + "]"
     async with pool.connection() as conn:
         await conn.execute(
-            "UPDATE knowledge_chunks SET embedding = %s::vector WHERE id = %s",
-            (vector, chunk_id),
+            "UPDATE knowledge_chunks SET embedding = %s::vector, embedding_model = %s "
+            "WHERE id = %s",
+            (vector, model, chunk_id),
         )
 
 
-async def unembedded_chunks(pool: AsyncConnectionPool) -> list[dict[str, Any]]:
+async def unembedded_chunks(pool: AsyncConnectionPool, model: str) -> list[dict[str, Any]]:
+    """Chunks that `model` has not embedded — never embedded, or embedded by another.
+
+    `IS DISTINCT FROM` rather than `!=` because `embedding_model` is nullable and
+    `NULL != 'x'` evaluates to NULL, not true — a plain `!=` would skip every
+    un-embedded row, which is the exact set this function exists to return.
+    """
     async with pool.connection() as conn:
         cur = await conn.execute(
             "SELECT id::text, source, section, content FROM knowledge_chunks "
-            "WHERE embedding IS NULL"
+            "WHERE embedding IS NULL OR embedding_model IS DISTINCT FROM %s",
+            (model,),
         )
         rows = await cur.fetchall()
     return [_serialise(r) for r in rows]

@@ -79,9 +79,10 @@ async def embed(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[str, A
 
 async def retrieve(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[str, Any]:
     vector = _ws(state).get("vector")
+    model = runtime.context.embedding_model
     chunks = (
-        await repository.search_knowledge(runtime.context.pool, vector, limit=TOP_K)
-        if vector
+        await repository.search_knowledge(runtime.context.pool, vector, model, limit=TOP_K)
+        if vector and model
         else []
     )
 

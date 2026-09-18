@@ -6,13 +6,18 @@ Three beats, in this order. The third is the one that matters.
 
 ```bash
 make up && make migrate && make seed
-make ingest                 # needs live AWS credentials
+make ingest                 # embeds the policy corpus — see the warning below
 make dev                    # backend on :8000
 cd frontend && npm run dev   # frontend on :3000
 ```
 
 Requires either `ANTHROPIC_API_KEY` in `backend/.env`, or `LLM_PROVIDER=bedrock`
 with a current `aws login` session.
+
+**Run `make ingest` before the demo, and check `aws login` has not expired.**
+Skipping it produces no error: retrieval simply finds nothing and beat 3 answers
+"No internal policy document covers that question", which reads as a broken demo
+rather than an unembedded corpus.
 
 ---
 

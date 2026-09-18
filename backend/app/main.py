@@ -24,34 +24,13 @@ from app.core.eventloop import use_compatible_event_loop
 from app.db.checkpointer import build_checkpointer, open_pool
 from app.graph.build import build_graph
 from app.graph.deps import Deps
-from app.llm.provider import configure_event_loop_executor, get_chat_model
+from app.llm.provider import configure_event_loop_executor, get_chat_model, get_embeddings
 
 # Must run at import time, before uvicorn creates its event loop. Only affects
 # native Windows dev runs; a no-op in the container and on ECS.
 use_compatible_event_loop()
 
 log = logging.getLogger("app")
-
-
-def _build_embedder(settings):
-    """Embeddings are optional: only the knowledge workflow needs them.
-
-    A missing or misconfigured embedder must degrade to "no policy matched"
-    rather than taking down onboarding and claims with it, so this never raises.
-    """
-    if settings.llm_provider != "bedrock":
-        log.info("no embedder configured (provider=%s); knowledge workflow will not retrieve",
-                 settings.llm_provider)
-        return None
-    try:
-        from langchain_aws import BedrockEmbeddings
-
-        return BedrockEmbeddings(
-            model_id=settings.embedding_model_id, region_name=settings.aws_region
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.warning("embedder unavailable: %s", exc)
-        return None
 
 
 @asynccontextmanager
@@ -70,14 +49,22 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.pool = pool
     app.state.checkpointer = checkpointer
+    # None unless the provider is Bedrock. Only the knowledge workflow needs it,
+    # so the other two stay runnable without AWS credentials.
+    embedder = get_embeddings(settings)
     app.state.deps = Deps(
         pool=pool,
         model=get_chat_model(settings=settings),
-        embedder=_build_embedder(settings),
+        embedder=embedder,
+        embedding_model=settings.embedding_model_id if embedder else None,
     )
     app.state.graph = build_graph(checkpointer)
 
-    log.info("startup complete (provider=%s)", settings.llm_provider)
+    log.info(
+        "startup complete (provider=%s, embeddings=%s)",
+        settings.llm_provider,
+        settings.embedding_model_id if embedder else "disabled",
+    )
     try:
         yield
     finally:
