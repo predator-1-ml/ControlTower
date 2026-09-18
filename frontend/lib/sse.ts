@@ -5,14 +5,20 @@
  * request body. So this reads the response stream and parses the SSE framing by
  * hand — which is about twenty lines and avoids a dependency.
  *
- * Two details that matter:
+ * Three details that matter, all learned the hard way:
  *
- * - Frames are separated by a BLANK LINE, not by newline. A parser that splits
- *   on "\n" will emit half-frames the moment a payload is large enough to be
- *   split across chunks — and JSON.parse on a half-frame throws, killing the
- *   stream. The buffer below only consumes up to the last complete "\n\n".
+ * - **Line endings are CRLF.** sse-starlette (the server here) separates lines
+ *   with "\r\n", so frames end with "\r\n\r\n". A parser looking for "\n\n"
+ *   never matches, buffers the entire response, and emits nothing — while the
+ *   network tab shows a perfectly healthy 200 with kilobytes transferred. The
+ *   whole UI silently did nothing until this was found. The buffer is normalised
+ *   to "\n" before any boundary search.
  *
- * - The event name persists across the frame's lines, so `event:` must be
+ * - Frames are separated by a BLANK LINE, not by a newline. Splitting per line
+ *   emits half-frames the moment a payload spans two network chunks, and
+ *   JSON.parse on a half-frame throws and kills the stream.
+ *
+ * - The event name persists across a frame's lines, so `event:` must be
  *   remembered until its matching `data:` arrives.
  */
 
@@ -50,6 +56,11 @@ export async function streamChat(
     if (done) break;
 
     buffer += decoder.decode(value, { stream: true });
+
+    // Normalise CRLF before searching for a boundary. Safe against a chunk that
+    // splits "\r" from "\n": the lone "\r" simply stays in the buffer until its
+    // "\n" arrives, and only complete frames are ever consumed.
+    buffer = buffer.replace(/\r\n/g, "\n");
 
     // Consume only whole frames; leave any partial tail in the buffer.
     let boundary = buffer.indexOf("\n\n");

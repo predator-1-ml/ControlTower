@@ -32,6 +32,12 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # The SSE parser is the one piece of frontend logic with a genuinely
+      # invisible failure mode: a CRLF/LF mismatch returns 200, transfers every
+      # byte, and renders nothing — no error, no log, just an empty screen.
+      - name: SSE parser tests
+        run: node --test lib/sse.test.mjs
+
       # The build is the real test here: it catches server/client boundary
       # mistakes and bad imports that tsc alone does not.
       - name: Build
