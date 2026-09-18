@@ -30,3 +30,12 @@ export type ChatMessage = {
   role: "user" | "assistant";
   text: string;
 };
+
+/** GET /sessions/{id} — what a refreshed page redraws itself from. */
+export type SessionView = {
+  session_id: string;
+  status: "idle" | "awaiting_input";
+  messages: ChatMessage[];
+  plan: Task[];
+  pending_question: PendingQuestion | null;
+};

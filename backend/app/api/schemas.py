@@ -24,11 +24,19 @@ class TaskView(BaseModel):
     error: str | None = None
 
 
+class MessageView(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str
+
+
 class SessionView(BaseModel):
     """Everything a reconnecting client needs to redraw the session."""
 
     session_id: str
     status: Literal["idle", "awaiting_input"]
+    # The transcript, because SSE has no replay: a browser that refreshes has
+    # lost every token it was sent, and the checkpoint is the only copy left.
+    messages: list[MessageView]
     plan: list[TaskView]
     workflow_states: dict[str, Any]
     final_response: str | None = None

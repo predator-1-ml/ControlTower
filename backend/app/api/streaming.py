@@ -59,6 +59,7 @@ async def translate(
     run means guessing from timestamps.
     """
     seen_status: dict[str, str] = {}
+    seen_interrupts: set[str] = set()
     announced_plan = False
 
     async for chunk in chunks:
@@ -86,6 +87,13 @@ async def translate(
                 # question that was never delivered.
                 if node == "__interrupt__":
                     for item in update or ():
+                        # `subgraphs=True` reports one interrupt twice: once in
+                        # the subgraph's namespace and again as it propagates
+                        # through the parent. Same id both times, so the id is
+                        # what makes it one question rather than two.
+                        if item.id in seen_interrupts:
+                            continue
+                        seen_interrupts.add(item.id)
                         yield sse(
                             "interrupt",
                             {"trace_id": trace_id, "id": item.id, **(item.value or {})},

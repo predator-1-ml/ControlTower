@@ -188,6 +188,13 @@ async def test_session_survives_reconnect(app_client):
     assert state["plan"][0]["status"] == "done"
     assert state["final_response"]
 
+    # The transcript comes back too, both sides, in order. A refreshed browser
+    # has lost every token it was streamed; without this it redraws a plan with
+    # no conversation above it.
+    assert [m["role"] for m in state["messages"]] == ["user", "assistant"]
+    assert state["messages"][0]["text"] == "onboard CUST-1003"
+    assert state["messages"][1]["text"] == state["final_response"]
+
 
 async def test_onboarding_interrupt_reaches_the_client(app_client):
     """Regression: an interrupt raised inside a SUBGRAPH must reach the client.
@@ -208,6 +215,10 @@ async def test_onboarding_interrupt_reaches_the_client(app_client):
 
     interrupts = [payload for name, payload in events if name == "interrupt"]
     assert interrupts, f"interrupt never reached the client; got {[n for n, _ in events]}"
+    # Exactly once. `subgraphs=True` surfaces the same interrupt from the
+    # subgraph's namespace and again from the parent's; undeduplicated, the
+    # client is asked the same question twice. Observed against real Bedrock.
+    assert len(interrupts) == 1
     assert interrupts[0]["kind"] == "need_documents"
     assert "photo_id" in interrupts[0]["fields"]
 

@@ -6,13 +6,14 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 from sse_starlette.sse import EventSourceResponse
 
-from app.api.schemas import ChatRequest, SessionView, TaskView
+from app.api.schemas import ChatRequest, MessageView, SessionView, TaskView
 from app.api.streaming import sse, translate
 from app.graph.build import RECURSION_LIMIT
+from app.llm.provider import message_text
 
 router = APIRouter()
 
@@ -134,6 +135,16 @@ async def get_session(request: Request, session_id: str) -> SessionView:
     return SessionView(
         session_id=session_id,
         status="awaiting_input" if snapshot.interrupts else "idle",
+        messages=[
+            MessageView(
+                role="user" if isinstance(m, HumanMessage) else "assistant",
+                # message_text, not .content: Gemini returns a list of content
+                # blocks there, signature blob included.
+                text=message_text(m),
+            )
+            for m in values.get("messages", [])
+            if isinstance(m, HumanMessage | AIMessage)
+        ],
         plan=[
             TaskView(
                 id=t.id,

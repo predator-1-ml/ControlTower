@@ -5,7 +5,9 @@ import { useCallback, useEffect, useState } from "react";
 import { ChatPanel } from "@/components/ChatPanel";
 import { WorkflowPanel } from "@/components/WorkflowPanel";
 import { streamChat } from "@/lib/sse";
-import type { ChatMessage, PendingQuestion, Task } from "@/lib/types";
+import type { ChatMessage, PendingQuestion, SessionView, Task } from "@/lib/types";
+
+const SESSION_KEY = "control-tower.session";
 
 /**
  * Single operational screen: conversation on the left, plan and activity on the
@@ -28,9 +30,6 @@ export default function Page() {
   // Effects run only on the client, so the server renders an empty id, hydration
   // matches, and the id is filled in immediately afterwards.
   const [sessionId, setSessionId] = useState("");
-  useEffect(() => {
-    setSessionId(`ui-${crypto.randomUUID()}`);
-  }, []);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -38,6 +37,46 @@ export default function Page() {
   const [pending, setPending] = useState<PendingQuestion | null>(null);
   const [traceId, setTraceId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // The id is kept in sessionStorage so a REFRESH returns to the same thread.
+  // Held only in React state, a refresh minted a new id: the paused workflow was
+  // still safe in Postgres but unreachable, and the question it was waiting on
+  // vanished from the screen — the durability was real and the UI hid it.
+  //
+  // sessionStorage, not localStorage: it is per-tab, so a second tab is a second
+  // conversation rather than two tabs racing turns onto one thread (the backend
+  // rejects that with a 409).
+  useEffect(() => {
+    const stored = sessionStorage.getItem(SESSION_KEY);
+    const id = stored ?? `ui-${crypto.randomUUID()}`;
+    sessionStorage.setItem(SESSION_KEY, id);
+    setSessionId(id);
+    if (!stored) return;
+
+    // SSE has no replay, so everything streamed before the refresh is gone from
+    // the browser. The checkpoint is the only copy; redraw from it. A 404 just
+    // means the stored id never reached the backend — an empty session.
+    fetch(`/bff/sessions/${id}`)
+      .then((response) => (response.ok ? response.json() : null))
+      .then((session: SessionView | null) => {
+        if (!session) return;
+        setMessages(session.messages);
+        setTasks(session.plan);
+        setPending(session.pending_question);
+      })
+      .catch(() => {});
+  }, []);
+
+  const newSession = useCallback(() => {
+    const id = `ui-${crypto.randomUUID()}`;
+    sessionStorage.setItem(SESSION_KEY, id);
+    setSessionId(id);
+    setMessages([]);
+    setTasks([]);
+    setActivity([]);
+    setPending(null);
+    setTraceId(null);
+  }, []);
 
   const send = useCallback(
     async (text: string) => {
@@ -127,10 +166,26 @@ export default function Page() {
   return (
     <main className="mx-auto grid h-screen max-w-6xl grid-cols-1 gap-6 p-6 lg:grid-cols-[1fr_360px]">
       <section className="flex min-h-0 flex-col">
-        <h1 className="mb-1 text-lg font-semibold text-slate-800">AI Operations Control Tower</h1>
-        <p className="mb-4 text-sm text-slate-500">
-          Onboarding, claims and knowledge — one conversation.
-        </p>
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <div>
+            <h1 className="mb-1 text-lg font-semibold text-slate-800">
+              AI Operations Control Tower
+            </h1>
+            <p className="text-sm text-slate-500">
+              Onboarding, claims and knowledge — one conversation.
+            </p>
+          </div>
+          {/* Disabled mid-turn: abandoning a thread while its stream is still
+              writing would leave the old turn's events landing in the new one. */}
+          <button
+            type="button"
+            onClick={newSession}
+            disabled={busy}
+            className="shrink-0 rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+          >
+            New session
+          </button>
+        </div>
         <div className="min-h-0 flex-1">
           {/* Disabled until the session id exists, so the composer cannot be
               used during the single frame before the mount effect runs. */}
