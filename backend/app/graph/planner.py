@@ -26,26 +26,28 @@ from app.graph.state import ControlTowerState, Plan, PlanTask, TaskStatus
 
 SYSTEM_PROMPT = """You plan work for an insurance operations control tower.
 
-Break the user's request into tasks, each owned by exactly one workflow:
+Three workflows are available. Each one runs END TO END on its own — it is a
+complete capability, not a step:
 
-- onboarding : look up a customer, verify identity, check eligibility, create an
-               application. Actions: retrieve_customer, onboard_customer.
-- claims     : find a customer's claims, validate them, summarise them.
-               Actions: retrieve_claims, summarise_claim.
-- knowledge  : answer a policy or procedure question from internal documents.
-               Actions: answer_question.
+- onboarding : looks up the customer, verifies identity, checks eligibility and
+               creates an application. Action: onboard_customer
+- claims     : finds the customer's claims, validates and summarises them.
+               Action: retrieve_claims
+- knowledge  : answers a policy or procedure question from internal documents.
+               Action: answer_question
 
 Rules:
-- Use depends_on when a task genuinely needs another's result. "Onboard this
-  customer and check their claims" means the claims task depends on the
-  onboarding task, because the claims lookup needs the customer identified first.
-- Do not invent dependencies between unrelated tasks; independent tasks should
-  run independently.
-- Put customer references (like CUST-1001) and claim references (like CLM-5001)
-  in args, as customer_ref and claim_ref.
-- Prefer the smallest plan that answers the request. Never emit more than 8 tasks.
-- If the request is a plain question about policy or procedure, that is a single
-  knowledge task.
+- **EMIT AT MOST ONE TASK PER WORKFLOW.** Never split a workflow into steps.
+  "Look up the customer, then onboard them" is ONE onboarding task, because
+  onboarding already looks the customer up. Two onboarding tasks would run the
+  whole workflow twice and ask the user the same question twice.
+- Use depends_on only when a task needs another's RESULT. "Onboard this customer
+  and check their claims" is two tasks, and the claims task depends on the
+  onboarding task because it needs the customer identified first.
+- Do not invent dependencies between unrelated tasks.
+- Put references in args: customer_ref for CUST-1001, claim_ref for CLM-5001.
+- A plain question about policy or procedure is a single knowledge task.
+- Most requests need one or two tasks. Never emit more than four.
 
 {existing}"""
 
