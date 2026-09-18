@@ -47,3 +47,6 @@ Thumbs.db
 frontend/.next/
 frontend/next-env.d.ts
 frontend/tsconfig.tsbuildinfo
+
+# Browser-automation scratch output
+.playwright-mcp/
