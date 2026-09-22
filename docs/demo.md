@@ -68,7 +68,29 @@ Then a workflow that pauses:
 > **"Summarise claim CLM-5003."**
 
 CLM-5003 is missing `incident_report` and `police_reference`, so the claims
-workflow stops and asks for them. Supply anything; it completes.
+workflow stops and asks for them. Answer in plain words:
+
+> **"Incident report IR-2291, police ref PR-77431"**
+
+**What to point at:** the reply is *read*, not echoed. The model extracts the two
+references, code checks each value actually occurs in what was typed (so an
+invented reference is discarded), one node writes them, and the claim row moves to
+`under_review` with an `audit_events` row holding the values. The answer ends with
+a next step the code chose from the seeded policy — escalation to the duty
+manager, because 12,750 exceeds 10,000 — with the citation beside it.
+
+Supply only one of the two ("the police reference is PR-77431") and it asks again
+for just the other. Supply neither and the pause ends honestly: the claim is
+reported as still waiting, not quietly completed.
+
+> **Repeating this beat:** it mutates the seed. Put CLM-5003 back with
+> ```sql
+> UPDATE claims SET status = 'awaiting_information',
+>   missing_fields = '["incident_report", "police_reference"]'::jsonb
+>  WHERE claim_ref = 'CLM-5003';
+> ```
+> `make seed` also works, but it truncates `knowledge_chunks` too, so it forces a
+> re-ingest before Beat 1's knowledge question works again.
 
 **Why this works:** three things persist in the checkpoint between turns — the
 plan (the planner appends, it never replaces), `workflow_states` (keyed per

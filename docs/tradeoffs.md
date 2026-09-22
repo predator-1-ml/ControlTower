@@ -129,12 +129,28 @@ consumed as the answer to the open question. The fix is a classifier in front of
 the resume (answer vs. new request), which is an LLM judgement on the one path
 that is currently deterministic — not worth it at this scale.
 
-### Free-text answers to interrupts are recorded, not parsed
-**Gained:** the human-in-the-loop path has no LLM in it and cannot misread an
-answer into the wrong field.
-**Cost:** the supplied details are stored as the operator typed them
-(`workflow_states[...]["supplied"]`), not validated. Supplying "anything"
-satisfies the pause; a real system would attach structured fields to the prompt.
+In claims this is now at least *visible*: a new request typed at the pause
+extracts nothing, so the pause ends and the answer says the reply contained none
+of the requested details and the claim is still waiting. The operator is told,
+rather than silently ignored. Replies are still never stored as a `HumanMessage`
+— storing them would break the "the last human message is the request" rule that
+both the planner and `compose` depend on, so a restored transcript does not show
+them. A documented gap, not a fixed one.
+
+### The claims pause reads the reply; the onboarding pause does not
+**Gained:** in claims, a model extracts what the operator supplied and **code
+verifies it** — a pair is kept only if its name was asked for and its value occurs
+in the reply. So an invented reference is discarded, the claim row actually
+changes, and a partially answered pause asks again for just the rest.
+**Cost:** the verification stops invention, not nonsense. "yes" is accepted as a
+police reference if the operator typed "yes"; validating a reference *format*
+needs a schema per field that does not exist here. And the extraction is a model
+call on the human-in-the-loop path, so it can fail — caught in the node, surfaced
+as "the reply could not be read", never as a stuck task.
+
+Onboarding's pauses deliberately keep the old behaviour: they record what was
+typed and move on. Every decision that workflow makes has legal weight, so it has
+no LLM anywhere, and adding one to read a date of birth would be the first.
 
 ### In-process session concurrency guard
 **Gained:** two concurrent turns on one session cannot race the checkpointer,

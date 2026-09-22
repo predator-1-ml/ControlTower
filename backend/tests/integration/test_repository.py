@@ -20,6 +20,7 @@ from app.db.repository import (
     get_claim,
     get_customer,
     record_audit_event,
+    record_claim_information,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -86,6 +87,48 @@ async def test_rows_are_json_serialisable(pool):
 
     assert isinstance(claim["amount"], float)
     assert isinstance(claim["incident_date"], str)
+
+
+async def test_recording_information_clears_the_fields_and_reopens_the_claim(pool):
+    """One statement does the removal, the status move and the read-back.
+
+    Then it runs AGAIN. A process death between this UPDATE and the checkpoint
+    re-runs the node on resume, so a second run must leave the same row — the
+    guarantee the node's docstring claims and this is the only place that can
+    actually prove it.
+    """
+    try:
+        first = await record_claim_information(
+            pool, "CLM-5003", ["incident_report", "police_reference"]
+        )
+        assert first == {"status": "under_review", "missing_fields": []}
+
+        second = await record_claim_information(
+            pool, "CLM-5003", ["incident_report", "police_reference"]
+        )
+        assert second == first, "the write must be idempotent"
+    finally:
+        # The seed is load-bearing for other tests in this file and for the demo.
+        async with pool.connection() as conn:
+            await conn.execute(
+                "UPDATE claims SET status = 'awaiting_information', "
+                "missing_fields = '[\"incident_report\", \"police_reference\"]'::jsonb "
+                "WHERE claim_ref = 'CLM-5003'"
+            )
+
+
+async def test_a_partial_supply_removes_only_that_field_and_holds_the_status(pool):
+    """Still incomplete means still `awaiting_information` — no early re-opening."""
+    try:
+        row = await record_claim_information(pool, "CLM-5003", ["police_reference"])
+        assert row == {"status": "awaiting_information", "missing_fields": ["incident_report"]}
+    finally:
+        async with pool.connection() as conn:
+            await conn.execute(
+                "UPDATE claims SET status = 'awaiting_information', "
+                "missing_fields = '[\"incident_report\", \"police_reference\"]'::jsonb "
+                "WHERE claim_ref = 'CLM-5003'"
+            )
 
 
 async def test_create_application(pool):

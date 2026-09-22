@@ -33,8 +33,9 @@ complete capability, not a step:
 
 - onboarding : looks up the customer, verifies identity, checks eligibility and
                creates an application. Action: onboard_customer
-- claims     : finds the customer's claims, validates and summarises them.
-               Action: retrieve_claims
+- claims     : finds the customer's claims, checks them for missing information
+               (asking the handler for it if needed), applies the handling rules
+               and summarises them. Action: retrieve_claims
 - knowledge  : answers a policy or procedure question from internal documents.
                Action: answer_question
 

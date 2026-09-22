@@ -367,6 +367,66 @@ than two open claims" escalation (the `get_claim` path does not load sibling cla
 - [ ] Every new guard names the failure it prevents; every choice with a competitor records what lost (CLAUDE.md).
 - [ ] Net new surface stays small: no new files in `backend/app` or `frontend/components`.
 
+## Implementation notes
+
+Written during implementation (2026-09-22), branch `feat/readable-answers`.
+
+### Phase 0 — the probe did not reach Bedrock
+
+Run inside the backend container as specified. All six calls (three inputs × two
+attempts) failed identically:
+
+    LoginRefreshRequired: Your session has expired or credentials have changed.
+    Please reauthenticate using 'aws login'.
+
+The host `aws login` session had expired, and re-authenticating is interactive and
+would have killed the container's session too (CLAUDE.md: refresh tokens are
+single use). So **`Reply` is unproven against Nova Pro** — the schema is the
+planner's proven pattern (`with_structured_output(..., include_raw=True)`, a flat
+list of pairs) but the extraction quality is a gap to close before the demo.
+
+The probe was not wasted. It failed by **raising out of `ainvoke`**, not by
+returning `parsed=None` — which is exactly the case the plan says `include_raw=True`
+does not cover. `read_reply`'s `try` wraps the call for that reason, and the
+docstring now cites this probe rather than theorising.
+
+### Decisions the plan left open
+
+- **No passage count in the trail.** The plan said to include it only if the
+  `retrieve` update visibly carries `chunks`. Probed: the update carries
+  `workflow_states` (the whole dict) and `tool_results`, so reading a count would
+  mean `streaming.py` reaching inside a workflow's slice — the second mechanism
+  the plan said to avoid. Left out.
+- **`ns` shape confirmed** as `("claims:<uuid>",)` for subgraph nodes and `()` for
+  top-level ones, and pinned by a test.
+
+### Deviations
+
+- **`validate` sets `missing_fields` to `incomplete[0]`'s fields, not the union.**
+  The plan kept the union in `validate` and selected the claim in
+  `request_information`. Narrowing at the source removes the ambiguous value
+  entirely rather than working around it downstream, and `missing_fields` then has
+  one meaning everywhere: "outstanding on the claim we are asking about".
+- **`record_information` returns early when nothing was received**, instead of
+  issuing a no-op `UPDATE` plus an audit row saying nothing arrived. Keeps the
+  plan's two-edge diagram out of `read_reply` while keeping the audit log readable.
+- **One extra slice key, `supplied_now`.** The router needs to know whether *this*
+  reply made progress; `received` accumulates across re-asks and cannot answer it.
+- **`summarise` derives the outcome** (`summarised` vs `information_incomplete`)
+  from whether any claim still has missing fields. That is how "three outcomes" and
+  "one owner of `done`/`outcome`" both hold.
+- **`claims_facts` lives in `compose.py` and is imported by `summarise`**, rather
+  than the workflow growing its own `_claims_facts`-style formatter. The summary
+  and the final answer are then written from the same lines and cannot describe one
+  claim differently, and `_money`/`_day` have one home.
+- **`onboarding_facts` reads `ineligible_reasons`** as well as `reasons` — that is
+  the key the `reject` node actually writes.
+- `test_large_plan_does_not_hit_the_recursion_ceiling` now uses CLM-6xxx refs: the
+  shared stub makes CLM-5003 incomplete (matching the seed), which would otherwise
+  pause that run.
+- **`impeccable detect` was not run** — the implementation brief excluded the design
+  tooling. `DESIGN.md` §6 and `PRODUCT.md`'s SSE list are updated.
+
 ## Dependencies & Risks
 
 | Risk | Mitigation |

@@ -120,16 +120,32 @@ The line is drawn the same way in all three workflows:
 | Workflow | Code decides | Model does |
 |---|---|---|
 | Onboarding | identity, eligibility, approval — everything | nothing at all |
-| Claims | whether a claim is complete | writes the summary |
+| Claims | whether a claim is complete, whether a supplied value is real, what the next step is | reads the operator's free-text reply, writes the summary |
 | Knowledge | which excerpts are relevant | answers from them |
 
 Onboarding uses no LLM whatsoever. Every decision it makes has a legal or
 financial consequence and belongs where it can be read, tested, and pointed at
 during an audit.
 
+Claims has two model calls, each placed where the ambiguity genuinely is. The
+first, `read_reply`, turns "Incident report IR-2291, police ref PR-77431" into
+name/value pairs — and **code then verifies each one**: a pair is kept only if its
+name was asked for *and* its value occurs in the operator's own words. That stops
+invention; it does not validate a reference format, and the docstring says so,
+because a guard that reads as stronger than it is gets trusted for something it
+never did. The second, `summarise`, writes prose from facts that are already
+decided — `next_actions` chose the next step, the model only phrases it.
+
 A test asserts the claims model is **never called** on the incomplete branch: a
 fluent summary of an incomplete claim is exactly the confident-but-wrong output
 this split exists to prevent.
+
+The final answer follows the same line. `compose` is handed operator-facing fact
+lines built in code, never workflow state — it cannot narrate a UUID or a task
+name it was never shown. And text a workflow wrote itself (knowledge's cited
+answer, claims' summary) is passed through **verbatim**; when it was the turn's
+only task, `compose` makes zero model calls, so a citation cannot be damaged by a
+second pass over it.
 
 ## Human-in-the-loop
 
@@ -140,9 +156,27 @@ breakpoint, not an HITL mechanism.
 Anything above it executes twice. The rule followed everywhere here: `interrupt()`
 is the **first statement** in its node, and nodes that pause perform no writes.
 
-`create_application` — the only write in the system — lives in its own node for
-exactly this reason. An interrupt sharing that node would create two applications
-for one customer.
+`create_application` — onboarding's only write — lives in its own node for exactly
+this reason. An interrupt sharing that node would create two applications for one
+customer.
+
+The claims pause splits three ways for three different reasons:
+
+| Node | Why it is its own node |
+|---|---|
+| `request_information` | holds `interrupt()` as its first statement and does nothing else. It asks about **one** claim (`incomplete[0]`): a value supplied against a union of several claims' missing fields has no owning claim to be recorded on |
+| `read_reply` | so the operator's words are **checkpointed before** the fallible model call. A process death here resumes with the reply intact and re-runs only the extraction. Every failure is caught — uncaught, the interrupt is already consumed, the task is still `running`, and the operator's next message gets planned as a new request with their answer gone |
+| `record_information` | the write. One statement, idempotent (the node can re-run if the process dies before the checkpoint), and it returns the post-write row so state and database cannot disagree |
+
+Re-asking is bounded by **progress, not a counter**: the workflow asks again only
+if this reply supplied at least one new field and something is still outstanding.
+`missing_fields` is finite and strictly shrinks, so the loop terminates. A reply
+that supplies nothing ends the pause and the claim truthfully stays
+`awaiting_information`.
+
+`summarise` is the **single owner** of `done` and `outcome`, on every path. Two
+owners means a path that misses one leaves the task `running`, and the
+supervisor's guard retries it three times before failing it.
 
 ## Error handling
 

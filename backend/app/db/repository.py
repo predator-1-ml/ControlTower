@@ -92,6 +92,51 @@ async def create_application(
     return _serialise(row)
 
 
+async def record_claim_information(
+    pool: AsyncConnectionPool, claim_ref: str, received: list[str]
+) -> dict[str, Any] | None:
+    """Clear the fields an operator has now supplied, and re-open the claim if none remain.
+
+    **One statement, on purpose.** Read-then-write would need the claim's current
+    `missing_fields`, and between the read and the write another handler's update
+    is lost; `missing_fields - %s::text[]` removes exactly the supplied names from
+    whatever is there at write time, so a concurrent update survives. `RETURNING`
+    then gives the caller the post-write row, so there is no refresh query either
+    — and no window in which graph state disagrees with the database.
+
+    **Idempotent, and it has to be.** A process death between this UPDATE and the
+    checkpoint re-runs the node on resume. Removing names that are already gone
+    is a no-op and the status CASE is already false, so the second run leaves the
+    same row. The audit row the caller writes afterwards can duplicate — the
+    honest at-least-once guarantee, and a duplicate audit row is readable while a
+    lost one is not.
+
+    The status move is gated on `awaiting_information` rather than only on the
+    array emptying: a claim that is `open` or `under_review` with an outstanding
+    field must not be silently transitioned by an information update.
+
+    `missing_fields` is `jsonb`, and `jsonb - text[]` deletes those array
+    elements. The same array is passed three times because the extended query
+    protocol has no named parameters.
+    """
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            """
+            UPDATE claims
+               SET missing_fields = missing_fields - %s::text[],
+                   status = CASE
+                       WHEN status = 'awaiting_information'
+                        AND (missing_fields - %s::text[]) = '[]'::jsonb
+                       THEN 'under_review' ELSE status END
+             WHERE claim_ref = %s
+            RETURNING status, missing_fields
+            """,
+            (received, received, claim_ref),
+        )
+        row = await cur.fetchone()
+    return _serialise(row)
+
+
 async def search_knowledge(
     pool: AsyncConnectionPool, embedding: list[float], model: str, limit: int = 4
 ) -> list[dict[str, Any]]:

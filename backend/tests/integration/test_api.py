@@ -31,20 +31,29 @@ class StubResponse:
 
 
 class StubModel:
-    """Serves the planner a fixed Plan and everything else fixed text."""
+    """Serves the planner a fixed Plan and everything else fixed text.
 
-    def __init__(self, plan: Plan) -> None:
+    Structured calls dispatch on the SCHEMA: the planner asks for `Plan` and the
+    claims workflow's `read_reply` asks for `Reply`. Answering both with a `Plan`
+    gives `read_reply` an object with no `.supplied`.
+    """
+
+    def __init__(self, plan: Plan, fields: list[tuple[str, str]] | None = None) -> None:
         self.plan = plan
-        self._structured = False
+        self.fields = fields or []
+        self._schema: Any = None
 
-    def with_structured_output(self, _schema, **_kw):
-        clone = StubModel(self.plan)
-        clone._structured = True
+    def with_structured_output(self, schema, **_kw):
+        clone = StubModel(self.plan, self.fields)
+        clone._schema = schema
         return clone
 
     async def ainvoke(self, _messages, *_a: Any, **_kw: Any):
-        if self._structured:
+        if self._schema is Plan:
             return {"parsed": self.plan, "raw": None, "parsing_error": None}
+        if self._schema is not None:
+            parsed = self._schema(supplied=[{"name": n, "value": v} for n, v in self.fields])
+            return {"parsed": parsed, "raw": None, "parsing_error": None}
         return StubResponse("All tasks completed.")
 
 
@@ -151,14 +160,44 @@ async def test_chat_streams_plan_then_final(app_client):
     assert all("trace_id" in payload for _, payload in events)
 
 
-async def test_interrupt_surfaces_and_message_resumes_it(app_client):
-    """A message sent while paused is the answer, not a new request.
+@pytest.fixture
+async def restored_claim():
+    """Put CLM-5003 back the way the seed left it, whatever the test did to it.
+
+    The app now MUTATES the seed: satisfying the pause clears `missing_fields`
+    and moves the claim to `under_review`. Without this,
+    `test_repository.py::test_claim_carries_missing_fields` passes or fails
+    depending on which file pytest collected first — the worst kind of red.
+    """
+    from app.db.checkpointer import open_pool
+
+    yield
+    pool = await open_pool()
+    try:
+        async with pool.connection() as conn:
+            await conn.execute(
+                "UPDATE claims SET status = 'awaiting_information', "
+                "missing_fields = '[\"incident_report\", \"police_reference\"]'::jsonb "
+                "WHERE claim_ref = 'CLM-5003'"
+            )
+    finally:
+        await pool.close()
+
+
+async def test_interrupt_surfaces_and_the_reply_changes_the_claim(app_client, restored_claim):
+    """A message sent while paused is the answer, not a new request — and it lands.
 
     Planning instead would re-plan over the paused workflow and discard what the
-    user typed. This is the ordering the endpoint exists to get right.
+    user typed. That ordering is what the endpoint exists to get right; the rest
+    of this test is what the pause exists to get right. It used to store the
+    reply verbatim and end: the claim row never changed and no audit row was
+    written, so "supply anything and it completes" was literally true.
     """
     client, app = app_client
-    app.state.deps.model = StubModel(PLAN_INCOMPLETE_CLAIM)
+    app.state.deps.model = StubModel(
+        PLAN_INCOMPLETE_CLAIM,
+        fields=[("incident_report", "IR-77"), ("police_reference", "PR-12")],
+    )
     session = f"api-{uuid.uuid4()}"
 
     first = await _collect_sse(client, {"session_id": session, "message": "summarise CLM-5003"})
@@ -173,7 +212,50 @@ async def test_interrupt_surfaces_and_message_resumes_it(app_client):
 
     after = (await client.get(f"/sessions/{session}")).json()
     assert after["status"] == "idle"
-    assert after["workflow_states"]["claims"]["outcome"] == "information_requested"
+    assert after["workflow_states"]["claims"]["outcome"] == "summarised"
+
+    from app.db.checkpointer import open_pool
+
+    pool = await open_pool()
+    try:
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT status, missing_fields FROM claims WHERE claim_ref = 'CLM-5003'"
+            )
+            row = await cur.fetchone()
+            cur = await conn.execute(
+                "SELECT detail FROM audit_events WHERE session_id = %s AND node = %s",
+                (session, "record_information"),
+            )
+            audit = await cur.fetchall()
+    finally:
+        await pool.close()
+
+    assert row["status"] == "under_review"
+    assert row["missing_fields"] == []
+    # The only record that IR-77 was ever supplied: there is no documents table.
+    assert len(audit) == 1
+    assert audit[0]["detail"]["received"] == {
+        "incident_report": "IR-77",
+        "police_reference": "PR-12",
+    }
+
+
+async def test_a_reply_that_supplies_nothing_leaves_the_claim_alone(app_client, restored_claim):
+    """The pause ends honestly rather than looping or pretending it completed."""
+    client, app = app_client
+    app.state.deps.model = StubModel(PLAN_INCOMPLETE_CLAIM, fields=[])
+    session = f"api-{uuid.uuid4()}"
+
+    await _collect_sse(client, {"session_id": session, "message": "summarise CLM-5003"})
+    second = await _collect_sse(
+        client, {"session_id": session, "message": "what does this claim need again?"}
+    )
+
+    assert not any(name == "interrupt" for name, _ in second), "must not re-ask"
+    after = (await client.get(f"/sessions/{session}")).json()
+    assert after["status"] == "idle"
+    assert after["workflow_states"]["claims"]["outcome"] == "information_incomplete"
 
 
 async def test_session_survives_reconnect(app_client):
