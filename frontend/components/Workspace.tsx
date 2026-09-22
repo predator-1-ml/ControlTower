@@ -285,6 +285,7 @@ export function Workspace({ operator }: { operator: string }) {
       // Assistant text arrives as `token` fragments; accumulate locally and
       // replace with the authoritative `final` when it lands.
       let streamed = "";
+      let streamingNode = "";
       const pushAssistant = (value: string) => {
         setMessages((prev) => {
           const last = prev[prev.length - 1];
@@ -354,10 +355,20 @@ export function Workspace({ operator }: { operator: string }) {
               break;
             }
 
-            case "token":
+            case "token": {
+              // A turn can stream from two nodes — a workflow writes its summary,
+              // then `compose` narrates the rest. Restart the draft when the node
+              // changes, or the two arrive glued together as one answer until
+              // `final` replaces them.
+              const node = String(data.node ?? "");
+              if (node !== streamingNode) {
+                streamingNode = node;
+                streamed = "";
+              }
               streamed += String(data.text ?? "");
               pushAssistant(streamed);
               break;
+            }
 
             case "interrupt": {
               const question = data as unknown as PendingQuestion;

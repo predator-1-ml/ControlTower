@@ -8,15 +8,18 @@ model's ability to produce a good plan.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
 import pytest
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.runtime import Runtime
 
 from app.db import repository
 from app.graph.build import RECURSION_LIMIT, build_graph
+from app.graph.compose import claims_facts, compose_response, model_input, written_texts
 from app.graph.deps import Deps
 from app.graph.state import Plan, PlanTask, TaskStatus, new_state
 
@@ -35,27 +38,43 @@ class StubResponse:
 class StubModel:
     """Serves the planner a fixed Plan and everything else a fixed string.
 
-    `with_structured_output` returns self, so one object covers both the planner
-    (structured) and compose/summarise (plain text) call paths.
+    **Structured calls dispatch on the schema.** There are two of them now — the
+    planner asks for `Plan`, the claims workflow's `read_reply` asks for `Reply` —
+    and a stub that hands a `Plan` to every structured call gives `read_reply` an
+    object with no `.supplied`, which fails as an AttributeError a long way from
+    the cause. `fields` is what a `Reply` should come back with.
+
+    `calls` counts plain (unstructured) invocations, which is how "compose made
+    zero model calls" is asserted.
     """
 
-    def __init__(self, plan: Plan | None = None, reply: str = "Done.") -> None:
+    def __init__(
+        self,
+        plan: Plan | None = None,
+        reply: str = "Done.",
+        fields: list[tuple[str, str]] | None = None,
+    ) -> None:
         self.plan = plan
         self.reply = reply
-        self._structured = False
+        self.fields = fields or []
+        self._schema: Any = None
         self.plan_calls = 0
+        self.calls = 0
 
-    def with_structured_output(self, _schema, **_kw):
-        clone = StubModel(self.plan, self.reply)
-        clone._structured = True
-        clone.plan_calls = 0
+    def with_structured_output(self, schema, **_kw):
+        clone = StubModel(self.plan, self.reply, self.fields)
+        clone._schema = schema
         self._child = clone
         return clone
 
     async def ainvoke(self, _messages, *_a: Any, **_kw: Any):
-        if self._structured:
+        if self._schema is Plan:
             self.plan_calls += 1
             return {"parsed": self.plan, "raw": None, "parsing_error": None}
+        if self._schema is not None:
+            parsed = self._schema(supplied=[{"name": n, "value": v} for n, v in self.fields])
+            return {"parsed": parsed, "raw": None, "parsing_error": None}
+        self.calls += 1
         return StubResponse(self.reply)
 
 
@@ -212,36 +231,162 @@ async def test_second_turn_extends_the_plan_and_keeps_earlier_tasks():
     assert all(t.status is TaskStatus.DONE for t in result["plan"])
 
 
-def test_the_summary_covers_this_turn_only():
+# ------------------------------------------------------- what compose is given
+#
+# Guard the INPUT, not the output. Asserting on the model's prose would be flaky
+# and would pass the moment the prompt changed; asserting on the curated input is
+# deterministic, and the input is where the leak actually was.
+
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def composable(**slices: dict) -> Any:
+    """State with one done task per slice, all in this turn."""
+    state = new_state(session_id="s", user_id="u", trace_id="t")
+    state["messages"] = [HumanMessage(content="Summarise claim CLM-5003.")]
+    state["plan"] = [
+        PlanTask(id=f"t{i}", workflow=name, action=f"{name}_action", status=TaskStatus.DONE)
+        for i, name in enumerate(slices, start=1)
+    ]
+    state["turn_task_ids"] = [t.id for t in state["plan"]]
+    state["workflow_states"] = dict(slices)
+    return state
+
+
+def test_the_model_is_never_shown_state():
+    """The bug this whole node was rewritten for.
+
+    `_summarise` handed the model `str(dict)` of each slice with two keys
+    excluded, so UUIDs, raw floats and `[t1] claims.retrieve_claims -> done`
+    reached the handler's answer. The model can only leak what it is shown.
+    """
+    state = composable(
+        claims={
+            "claims": [
+                {
+                    "id": "44d65b54-51f7-440a-a34a-f4832916bcde",
+                    "claim_ref": "CLM-5003",
+                    "claim_type": "property",
+                    "status": "under_review",
+                    "amount": 12750.0,
+                    "incident_date": "2026-09-01",
+                    "missing_fields": [],
+                    "customer_name": "Tom Baker",
+                    "customer_ref": "CUST-1004",
+                }
+            ],
+        },
+        onboarding={
+            "outcome": "application_created",
+            "customer": {"id": "0f2b3c44-0000-4000-8000-000000000001",
+                         "full_name": "Priya Raman", "external_ref": "CUST-1001"},
+            "application": {"id": "9a1e2f66-0000-4000-8000-000000000002",
+                            "customer_id": "0f2b3c44-0000-4000-8000-000000000001",
+                            "product": "motor_policy", "status": "submitted"},
+        },
+    )
+
+    prompt = model_input(state)
+    assert not UUID_RE.search(prompt), prompt
+    assert "claims_action" not in prompt and "onboarding_action" not in prompt
+    assert "[t1]" not in prompt and "[t2]" not in prompt
+    # The handler's own vocabulary survives.
+    assert "CLM-5003" in prompt and "Tom Baker" in prompt and "CUST-1004" in prompt
+
+
+def test_amounts_and_dates_are_written_the_way_a_handler_reads_them():
+    """`12750.0` and `2026-09-01` are column values, not English.
+
+    The date is built as `f"{d.day} {d:%b %Y}"`; `%-d` would be the obvious way
+    and raises ValueError on Windows, where this also has to run.
+    """
+    facts = claims_facts(
+        {"claims": [{"claim_ref": "CLM-5003", "claim_type": "property",
+                     "status": "under_review", "amount": 12750.0,
+                     "incident_date": "2026-09-01"}]}
+    )
+    assert "Amount claimed: 12,750.00" in facts
+    assert "Incident date: 1 Sep 2026" in facts
+    assert "Status: Under review" in facts
+
+
+def test_claims_facts_tolerate_a_claim_with_no_customer_name():
+    """`get_active_claims` does not join the customer table; `get_claim` does.
+
+    Both feed the same slice, so the formatter sees both shapes.
+    """
+    facts = claims_facts(
+        {"claims": [{"claim_ref": "CLM-5001", "claim_type": "motor", "status": "open",
+                     "amount": 4820.0, "incident_date": "2026-08-21"}]}
+    )
+    assert facts[0] == "Claim CLM-5001: motor claim"
+
+
+def test_the_operators_request_leads_the_model_input():
+    state = composable(claims={"claims": []})
+    assert model_input(state).startswith('Operator\'s request: "Summarise claim CLM-5003."')
+
+
+def test_a_failed_task_is_still_reported():
+    """A half-succeeded request is a Tuesday. Reporting only the good half lies."""
+    state = composable(onboarding={"outcome": "application_created"})
+    state["plan"].append(
+        PlanTask(id="t9", workflow="knowledge", action="answer_question",
+                 status=TaskStatus.FAILED, error="embedder unavailable")
+    )
+    state["turn_task_ids"].append("t9")
+
+    prompt = model_input(state)
+    assert "A knowledge task failed: embedder unavailable" in prompt
+
+
+def test_only_this_turns_workflows_are_reported():
     """The plan and every workflow slice outlive their turn; the report must not.
 
     Observed live: after onboarding one customer, a second request produced
     "two onboarding tasks were completed" — the composer was handed the whole
     session. `turn_task_ids` is what scopes it.
     """
-    from app.graph.compose import _summarise
+    state = composable(onboarding={"outcome": "manual_review", "review_reason": "kyc failed"})
+    state["plan"].insert(
+        0, PlanTask(id="t0", workflow="claims", action="x", status=TaskStatus.DONE)
+    )
+    state["workflow_states"]["claims"] = {"summary": "An older turn's summary."}
 
-    state = new_state(session_id="s", user_id="u", trace_id="t")
-    state["plan"] = [
-        PlanTask(id="t1", workflow="onboarding", action="onboard_customer",
-                 status=TaskStatus.DONE),
-        PlanTask(id="t2", workflow="claims", action="retrieve_claims", status=TaskStatus.DONE),
-    ]
-    state["workflow_states"] = {
-        "onboarding": {"outcome": "application_created"},
-        "claims": {"outcome": "summarised"},
-    }
-    state["turn_task_ids"] = ["t2"]
+    assert "older turn" not in (model_input(state) or "")
+    assert written_texts(state) == []
 
-    summary = _summarise(state)
-    assert "[t2]" in summary and "summarised" in summary
-    assert "[t1]" not in summary and "application_created" not in summary
 
-    # A thread checkpointed before the field existed has no such key. It must
-    # still get an answer — the old, whole-session one — rather than a KeyError
-    # or "No tasks were planned."
-    del state["turn_task_ids"]
-    assert "[t1]" in _summarise(state)
+async def test_a_workflow_that_wrote_the_answer_is_not_paraphrased():
+    """Single knowledge task: compose makes ZERO model calls.
+
+    Citations are built from the retrieved chunks, not from the model
+    (knowledge/graph.py). A second pass over them can only damage them, and a
+    damaged citation silently stops being a source chip in the UI.
+    """
+    answer = "Motor claims of 5000 or more need a second review [claims-handling-policy.md, Motor]."
+    state = composable(knowledge={"outcome": "answered", "answer": answer})
+    model = StubModel(reply="a paraphrase nobody asked for")
+
+    result = await compose_response(state, Runtime(context=deps(model)))
+
+    assert result["final_response"] == answer
+    assert model.calls == 0
+
+
+async def test_a_mixed_turn_appends_the_written_text_verbatim():
+    """Onboarding produces facts to narrate; knowledge produced its own answer."""
+    answer = "Identity checks need a photo ID [onboarding-policy.md, Identity verification]."
+    state = composable(
+        onboarding={"outcome": "manual_review", "review_reason": "identity verification failed"},
+        knowledge={"outcome": "answered", "answer": answer},
+    )
+    model = StubModel(reply="CUST-1001 went to manual review.")
+
+    result = await compose_response(state, Runtime(context=deps(model)))
+
+    assert model.calls == 1
+    assert result["final_response"] == "CUST-1001 went to manual review.\n\n" + answer
 
 
 async def test_failed_identity_routes_to_manual_review():

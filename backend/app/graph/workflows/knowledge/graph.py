@@ -36,11 +36,16 @@ TOP_K = 4
 SYSTEM_PROMPT = """You answer operational policy questions for an insurance handler.
 
 Answer ONLY from the excerpts provided. Rules:
+- Answer the question in the first sentence. Then any detail that changes what
+  the handler does.
 - If the excerpts do not answer the question, say so plainly. Do not fill the gap
   from general knowledge — a confident invented policy is worse than no answer.
 - Cite the source of each claim inline, as [source, section].
 - Be brief. Two or three sentences unless the question genuinely needs more.
-- No preamble."""
+- Plain text. Short lines. No headings, no preamble."""
+# This answer is never paraphrased downstream: when it is the turn's only task it
+# IS the final response (compose.py). So the voice rules have to live here too —
+# there is no second pass to tidy it up.
 
 
 def _ws(state: ControlTowerState) -> dict[str, Any]:

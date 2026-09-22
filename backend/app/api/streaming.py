@@ -72,10 +72,16 @@ async def translate(
 
         if kind == "messages":
             message, meta = data
-            if meta.get("langgraph_node") in STREAMING_NODES:
+            node = meta.get("langgraph_node")
+            if node in STREAMING_NODES:
                 text = getattr(message, "text", None) or getattr(message, "content", "")
                 if text:
-                    yield sse("token", {"trace_id": trace_id, "text": text})
+                    # `node` rides along because a turn can stream from two nodes:
+                    # a workflow writes its summary, then `compose` narrates the
+                    # rest. Without it the client concatenates the two into one
+                    # message and shows an answer glued to the next until `final`
+                    # replaces both.
+                    yield sse("token", {"trace_id": trace_id, "node": node, "text": text})
 
         elif kind == "updates":
             for node, update in (data or {}).items():
