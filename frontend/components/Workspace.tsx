@@ -286,13 +286,20 @@ export function Workspace({ operator }: { operator: string }) {
       // replace with the authoritative `final` when it lands.
       let streamed = "";
       let streamingNode = "";
+
+      // What this browser watched the graph do, in order. It rides ON the
+      // assistant turn rather than beside it so it stays attached to the answer
+      // it belongs to when the transcript scrolls.
+      const steps: string[] = [];
+
+      // `steps` must be carried on every rewrite: this replaces the whole
+      // message object, so rebuilding it as `{role, text}` dropped the trail on
+      // the first token of every turn.
       const pushAssistant = (value: string) => {
         setMessages((prev) => {
+          const turn: ChatMessage = { role: "assistant", text: value, steps: [...steps] };
           const last = prev[prev.length - 1];
-          if (last?.role === "assistant") {
-            return [...prev.slice(0, -1), { role: "assistant", text: value }];
-          }
-          return [...prev, { role: "assistant", text: value }];
+          return last?.role === "assistant" ? [...prev.slice(0, -1), turn] : [...prev, turn];
         });
       };
 
@@ -334,9 +341,19 @@ export function Workspace({ operator }: { operator: string }) {
                   ...planned,
                 ]),
               );
+              // The trail opens with the plan, and this is the first thing that
+              // creates the assistant turn — so the operator sees the system
+              // working before any token arrives, instead of a blank pane.
+              steps.push(`Planned ${count(planned.length, "task")}`);
+              pushAssistant(streamed);
               log(`plan · ${count(planned.length, "task")}`);
               break;
             }
+
+            case "step":
+              steps.push(String(data.label ?? ""));
+              pushAssistant(streamed);
+              break;
 
             case "task": {
               const task = data as unknown as Task;
@@ -373,6 +390,13 @@ export function Workspace({ operator }: { operator: string }) {
             case "interrupt": {
               const question = data as unknown as PendingQuestion;
               move(() => setPending(question));
+              // A paused turn gets no `token` and no `final`, so this turn stays
+              // trail-only — on purpose: the trail ending in "needs your answer",
+              // directly above the question card. The pausing node has no step
+              // label of its own (its update fires on the resume turn), so this
+              // is where the trail learns it stopped.
+              steps.push("needs your answer");
+              pushAssistant(streamed);
               log(`paused · ${question.workflow} needs input`);
               break;
             }

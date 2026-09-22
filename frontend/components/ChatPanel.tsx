@@ -22,14 +22,23 @@ const PROMPTS = [
 // 48rem keeps an answer near a 75-character line.
 const COLUMN = "mx-auto w-full max-w-3xl";
 
-// Record ids the handler already knows (PRODUCT.md): CUST-1001, CLM-5003. Marked
-// so a long answer can be scanned for "which customer, which claim" without
-// reading every word. The capture group makes split() keep the ids, so the odd
-// indexes are the matches.
-const RECORD_ID = /\b((?:CUST|CLM)-\d+)\b/;
+// Two things a handler scans an answer for: the record ids they already know
+// (CUST-1001, CLM-5003 — PRODUCT.md) and where a statement came from
+// (`[claims-handling-policy.md, Escalation]`, written inline by the knowledge
+// workflow from the chunks it actually retrieved).
+//
+// ONE capture group wrapping BOTH alternatives, not one per alternative: split()
+// keeps every group, so a second group would put `undefined` at every other odd
+// index and break the `index % 2` trick below.
+//
+// Parsed from the text rather than carried as a payload on `final`, because
+// restored messages are `{role, text}` — a sources payload would vanish on
+// refresh, and the citation would stop being a chip exactly when the operator
+// came back to re-read it.
+const MARKED = /(\b(?:CUST|CLM)-\d+\b|\[[\w-]+\.md, [^\]]+\])/;
 
 function withRecordIds(text: string) {
-  return text.split(RECORD_ID).map((part, index) =>
+  return text.split(MARKED).map((part, index) =>
     index % 2 === 1 ? (
       // nowrap: an id broken across two lines ("CLM-" / "5001") cannot be scanned.
       <span key={index} className="whitespace-nowrap rounded bg-sunken px-0.5 font-semibold">
@@ -171,16 +180,36 @@ export function ChatPanel({
                   </span>
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-semibold leading-8">Control Tower</p>
+                    {/* The step trail: what this browser watched the graph do,
+                        quiet and above the answer. Process belongs here, not in
+                        the prose — the answer below is only the answer. One
+                        wrapping line of plain text, not a component: it is a
+                        sentence, and a row of pills would compete with the
+                        question card for attention. */}
+                    {message.steps && message.steps.length > 0 && (
+                      <p className="mb-1.5 flex flex-wrap items-center gap-x-1.5 text-sm text-ink-2">
+                        {busy && index === messages.length - 1 && (
+                          <StatusGlyph glyph="arc" className="h-3.5 w-3.5" />
+                        )}
+                        {message.steps.join(" › ")}
+                      </p>
+                    )}
                     {/* `printing` adds the caret to the turn that is still growing.
-                        break-words: answers quote 36-character UUIDs, which
-                        otherwise overflow a phone. */}
-                    <p
-                      className={`whitespace-pre-wrap break-words leading-relaxed ${
-                        busy && index === messages.length - 1 ? "printing" : ""
-                      }`}
-                    >
-                      {withRecordIds(message.text)}
-                    </p>
+                        break-words: a citation or a long reference otherwise
+                        overflows a phone.
+
+                        Only rendered once there is text: a turn that PAUSED gets
+                        no token and no final, so it is a trail-only turn and an
+                        empty paragraph would leave a blank line hanging under it. */}
+                    {message.text && (
+                      <p
+                        className={`whitespace-pre-wrap break-words leading-relaxed ${
+                          busy && index === messages.length - 1 ? "printing" : ""
+                        }`}
+                      >
+                        {withRecordIds(message.text)}
+                      </p>
+                    )}
                   </div>
                 </div>
               ),

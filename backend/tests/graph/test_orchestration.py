@@ -8,6 +8,7 @@ model's ability to produce a good plan.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -17,6 +18,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.runtime import Runtime
 
+from app.api.streaming import translate
 from app.db import repository
 from app.graph.build import RECURSION_LIMIT, build_graph
 from app.graph.compose import claims_facts, compose_response, model_input, written_texts
@@ -124,11 +126,17 @@ def stub_db(monkeypatch):
         return {
             "claim_ref": ref,
             "customer_name": "Daniel Okafor",
+            "customer_ref": "CUST-1002",
             "claim_type": "motor",
             "status": "open",
             "amount": 100.0,
             "incident_date": "2026-01-01",
-            "missing_fields": [],
+            # CLM-5003 is the seed's incomplete claim, and it is incomplete here
+            # too: a stub that disagrees with the seed makes the branch these
+            # tests exercise the one the demo never takes.
+            "missing_fields": ["incident_report", "police_reference"]
+            if ref == "CLM-5003"
+            else [],
         }
 
     async def create_application(_pool, customer_id, product, status):
@@ -389,6 +397,90 @@ async def test_a_mixed_turn_appends_the_written_text_verbatim():
     assert result["final_response"] == "CUST-1001 went to manual review.\n\n" + answer
 
 
+# ------------------------------------------------------------- the step trail
+
+
+async def sse_frames(plan: Plan, message: str, thread: str) -> list[tuple[str, dict]]:
+    """Run the real graph and translate it, exactly as `/chat` does."""
+    graph = build_graph(checkpointer=InMemorySaver())
+    stream = graph.astream(
+        state_with(message),
+        cfg(thread),
+        context=deps(StubModel(plan)),
+        stream_mode=["updates", "messages"],
+        subgraphs=True,
+        version="v2",
+    )
+    return [
+        (frame["event"], json.loads(frame["data"]))
+        async for frame in translate(stream, trace_id="t1", known={})
+    ]
+
+
+async def test_the_subgraph_namespace_shape_is_what_the_step_labels_assume():
+    """Pins LangGraph's `ns`, which the workflow half of every step label comes from.
+
+    `subgraphs=True` namespaces a subgraph node as ("claims:<uuid>",) and leaves
+    a top-level node's tuple empty. That is LangGraph's shape, not ours; if it
+    changes, every step label silently becomes unmapped and the trail just goes
+    quiet — a failure with no error attached to it.
+    """
+    graph = build_graph(checkpointer=InMemorySaver())
+    plan = Plan(goal="g", tasks=[PlanTask(id="1", workflow="claims", action="retrieve_claims",
+                                          args={"customer_ref": "CUST-1002"})])
+    seen: dict[str, tuple] = {}
+    async for chunk in graph.astream(
+        state_with("any claims for CUST-1002?"), cfg("ns-shape"),
+        context=deps(StubModel(plan)),
+        stream_mode=["updates"], subgraphs=True, version="v2",
+    ):
+        for node in (chunk.get("data") or {}):
+            seen[node] = chunk.get("ns") or ()
+
+    assert seen["planner"] == ()
+    assert seen["retrieve"][0].split(":")[0] == "claims"
+
+
+async def test_mapped_nodes_become_steps_and_unmapped_ones_stay_silent():
+    """`retrieve` exists in two subgraphs, which is why the map is keyed by both."""
+    plan = Plan(
+        goal="claims and policy",
+        tasks=[
+            PlanTask(id="1", workflow="claims", action="retrieve_claims",
+                     args={"claim_ref": "CLM-5001"}),
+            PlanTask(id="2", workflow="knowledge", action="answer_question"),
+        ],
+    )
+    frames = await sse_frames(plan, "summarise CLM-5001 and check the policy", "steps")
+    labels = [payload["label"] for name, payload in frames if name == "step"]
+
+    assert "looked up the claim" in labels
+    assert "searched policy documents" in labels      # knowledge's retrieve, not claims'
+    assert "wrote the answer" in labels                # compose, at the top level
+
+    # `embed` is a real node that ran and is deliberately unmapped: a handler has
+    # no use for it. And no label may be a LangGraph node name.
+    assert "embed" not in labels
+    assert not {"retrieve", "generate", "compose", "validate"} & set(labels)
+
+
+async def test_the_pausing_node_has_no_step_label():
+    """Its update fires on the RESUME turn, so a label would appear one turn late.
+
+    The trail would then read "…asked you for information" underneath the answer,
+    with nothing above the question it is actually about. The frontend adds
+    "needs your answer" from the `interrupt` event instead.
+    """
+    plan = Plan(goal="claim", tasks=[PlanTask(id="1", workflow="claims",
+                                              action="summarise_claim",
+                                              args={"claim_ref": "CLM-5003"})])
+    frames = await sse_frames(plan, "summarise CLM-5003", "paused-steps")
+    labels = [payload["label"] for name, payload in frames if name == "step"]
+
+    assert any(name == "interrupt" for name, _ in frames)
+    assert labels == ["looked up the claim", "checked it for missing information"]
+
+
 async def test_failed_identity_routes_to_manual_review():
     plan = Plan(goal="onboard", tasks=[
         PlanTask(id="1", workflow="onboarding", action="onboard_customer",
@@ -438,8 +530,10 @@ async def test_large_plan_does_not_hit_the_recursion_ceiling():
     plan = Plan(
         goal="many claims",
         tasks=[
+            # 6000-range on purpose: CLM-5003 is the stub's incomplete claim and
+            # would pause the run, which is a different test.
             PlanTask(id=str(i), workflow="claims", action="summarise_claim",
-                     args={"claim_ref": f"CLM-{5000 + i}"})
+                     args={"claim_ref": f"CLM-{6000 + i}"})
             for i in range(1, 13)
         ],
     )

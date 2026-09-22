@@ -184,9 +184,13 @@ a marketing panel — there is nothing true to put in it.
 
 **Conversation (`ChatPanel.tsx`)** — the white column. The operator's turns are
 accent-on-wash bubbles, right-aligned; the system's are named ("Control Tower", a
-round CT badge) and unboxed, so every answer starts from the same left edge. Record
-ids (`CUST-1001`, `CLM-5003`) are marked inline and never wrap, so a long answer can
-be scanned for which customer and which claim. The empty state offers the demo
+round CT badge) and unboxed, so every answer starts from the same left edge. Under
+the name, a quiet **step trail** — `Planned 1 task › looked up the claim › needs your
+answer`, a spinning arc while the turn is live — so process is *shown* and the answer
+below is only the answer. A turn that paused has a trail and no text at all. Record
+ids (`CUST-1001`, `CLM-5003`) and citations (`[claims-handling-policy.md, Escalation]`)
+are marked inline and never wrap, so a long answer can be scanned for which customer,
+which claim, and where a statement came from. The empty state offers the demo
 script's requests as fill-the-composer buttons — they do not send, so a presenter
 can narrate first. When a workflow holds, its question is the **largest thing in the
 conversation** (scale follows urgency), the input gains an amber ring, and the button

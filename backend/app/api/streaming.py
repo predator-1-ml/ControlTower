@@ -9,6 +9,7 @@ upgrade. Everything crossing the wire is one of:
 
     plan       the task DAG, as soon as the planner produces it
     task       a task changed status
+    step       a graph node the handler would recognise has finished
     token      a fragment of assistant text
     interrupt  the graph paused and needs a human
     final      the composed answer
@@ -31,6 +32,39 @@ from typing import Any
 #: models (or would), and streaming their internals to the chat pane would be
 #: noise at best and confusing at worst.
 STREAMING_NODES = {"compose", "generate", "summarise"}
+
+#: What each node is called when a handler describes it. Keyed by
+#: `(workflow, node)` because `retrieve`, `validate` and `not_found` each exist in
+#: two subgraphs and mean different things in each.
+#:
+#: **The labels are mapped here, in the backend, so a LangGraph node name never
+#: crosses the wire** — the module rule above: the event names are the API, the
+#: chunk shapes are not. An unmapped node emits nothing, which is also how nodes
+#: a handler has no use for (`embed`) stay out of the trail.
+#:
+#: The pausing nodes are deliberately absent. Their update is emitted when the
+#: node *finishes*, which for a node holding an `interrupt()` is on the RESUME
+#: turn — so a label here would appear one turn late, under the answer instead of
+#: above the question. "Needs your answer" is added by the client from the
+#: `interrupt` event it already receives.
+STEP_LABELS: dict[tuple[str, str], str] = {
+    ("claims", "retrieve"): "looked up the claim",
+    ("claims", "validate"): "checked it for missing information",
+    ("claims", "not_found"): "found no active claims",
+    ("claims", "summarise"): "wrote the claim summary",
+    ("knowledge", "retrieve"): "searched policy documents",
+    ("knowledge", "generate"): "answered from the passages found",
+    ("knowledge", "no_results"): "found no matching policy",
+    ("onboarding", "load_customer"): "looked up the customer",
+    ("onboarding", "not_found"): "found no such customer",
+    ("onboarding", "validate"): "checked the customer record",
+    ("onboarding", "verify_identity"): "checked identity verification",
+    ("onboarding", "check_eligibility"): "applied the eligibility rules",
+    ("onboarding", "create_application"): "created the application",
+    ("onboarding", "manual_review"): "sent it to manual review",
+    ("onboarding", "reject"): "rejected the application",
+    ("", "compose"): "wrote the answer",
+}
 
 
 def sse(event: str, payload: dict[str, Any]) -> dict[str, str]:
@@ -84,6 +118,12 @@ async def translate(
                     yield sse("token", {"trace_id": trace_id, "node": node, "text": text})
 
         elif kind == "updates":
+            # `subgraphs=True` namespaces every subgraph node as
+            # ("<workflow>:<uuid>",); top-level nodes carry an empty tuple. That
+            # shape is LangGraph's, not ours, so it is pinned by a test.
+            ns = chunk.get("ns") or ()
+            workflow = ns[0].split(":")[0] if ns else ""
+
             for node, update in (data or {}).items():
                 # Interrupts arrive HERE, on the updates channel, keyed
                 # `__interrupt__` — not on `values` as one might expect, and the
@@ -109,6 +149,14 @@ async def translate(
 
                 if not isinstance(update, dict):
                     continue
+
+                # `updates` arrive when a node FINISHES, so the trail is a list of
+                # completed steps — not a claim about what is running now. That is
+                # the honest reading of "live" (PRODUCT.md, principle 3: claim only
+                # what was observed).
+                label = STEP_LABELS.get((workflow, node))
+                if label:
+                    yield sse("step", {"trace_id": trace_id, "label": label})
 
                 # The plan DAG, emitted the moment the planner produces it. This
                 # is what makes "planning before execution" visible rather than

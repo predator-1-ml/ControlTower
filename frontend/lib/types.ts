@@ -29,6 +29,13 @@ export type PendingQuestion = {
 export type ChatMessage = {
   role: "user" | "assistant";
   text: string;
+  /**
+   * The step trail for this turn: what this browser watched the graph do.
+   * Client-only — it is built from streamed `step` events and is absent from
+   * `GET /sessions/{id}`, so a restored turn correctly has none. The durable
+   * record of what ran is `audit_events`, joined by trace id.
+   */
+  steps?: string[];
 };
 
 /** GET /sessions/{id} — what a refreshed page redraws itself from. */

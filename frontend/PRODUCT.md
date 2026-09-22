@@ -63,8 +63,11 @@ Postgres, not in the process or the browser.
   variables, verified in a route handler, carried in a signed httpOnly cookie. No user
   store, no registration, no password reset. It exists because the tool is internal
   but its load balancer is public.
-- Live updates arrive as SSE events: `plan`, `task`, `token`, `interrupt`, `final`,
-  `error`, `done`. SSE has no replay; `GET /sessions/{id}` rebuilds the screen.
+- Live updates arrive as SSE events: `plan`, `task`, `step`, `token`, `interrupt`,
+  `final`, `error`, `done`. SSE has no replay; `GET /sessions/{id}` rebuilds the screen.
+- `step` carries a handler-readable label for a graph node that finished ("searched
+  policy documents"), never a node name. It builds the **step trail** on each answer:
+  browser-observed, so a restored turn has none — the durable record is `audit_events`.
 - The backend never reports "needs input" as a task status; the frontend derives it
   (`components/Status.tsx::displayStatus`). Keep that function and `restore()` in
   `app/page.tsx` — they are verified behaviour, not styling.
