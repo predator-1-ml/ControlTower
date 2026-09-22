@@ -263,19 +263,31 @@ def model_input(state: ControlTowerState) -> str | None:
     if problems:
         sections.append("Could not complete\n" + "\n".join(problems))
 
-    if not turn:
-        sections.append("Nothing ran\n- No tasks were planned for this request.")
-
     if not sections:
         return None
     return f'Operator\'s request: "{_request(state)}"\n\n' + "\n\n".join(sections)
+
+
+#: Written in code, not by the model. This path used to hand the model a prompt
+#: saying "Nothing ran — no tasks were planned" under a rule to "refer to things
+#: by CLM- and CUST- references". Given no references, Nova Pro invented them:
+#: observed live, "Nothing was done to escalate the situation for CLM-123456 and
+#: CUST-789101112". The model can only leak what it is shown, and here it was
+#: shown an instruction with nothing to fill it. So when nothing ran there is no
+#: model call at all — the same rule as a workflow that wrote its own answer.
+NOTHING_PLANNED = (
+    "I could not tell which workflow this request needs, so nothing was done. "
+    "Ask about a customer (CUST-…), a claim (CLM-…), or a policy or procedure question."
+)
 
 
 async def compose_response(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[str, Any]:
     prompt = model_input(state)
     written = written_texts(state)
 
-    if prompt is None:
+    if not _turn_tasks(state):
+        text = NOTHING_PLANNED
+    elif prompt is None:
         # The turn's only work was a workflow that writes its own text. Calling
         # the model here would paraphrase an answer that is already correct, and
         # the frontend would show it twice — streamed once from the workflow's

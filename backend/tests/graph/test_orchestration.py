@@ -366,6 +366,26 @@ def test_only_this_turns_workflows_are_reported():
     assert written_texts(state) == []
 
 
+async def test_a_turn_with_no_tasks_makes_no_model_call_and_invents_nothing():
+    """An empty plan is answered in code, not by the model.
+
+    Observed live: the planner emitted no task for "how to do escalation", and
+    the composer — told to use CLM- and CUST- references, with none to use —
+    wrote "Nothing was done to escalate the situation for CLM-123456 and
+    CUST-789101112". Earlier turns' tasks are still in the plan, as they were
+    then; `turn_task_ids` is what says none of them are this turn's.
+    """
+    state = composable(onboarding={"outcome": "application_created"})
+    state["turn_task_ids"] = []
+    model = StubModel(reply="Nothing was done for CLM-123456 and CUST-789101112.")
+
+    result = await compose_response(state, Runtime(context=deps(model)))
+
+    assert model.calls == 0
+    assert "CLM-123456" not in result["final_response"]
+    assert "nothing was done" in result["final_response"]
+
+
 async def test_a_workflow_that_wrote_the_answer_is_not_paraphrased():
     """Single knowledge task: compose makes ZERO model calls.
 

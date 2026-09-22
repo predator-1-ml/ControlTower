@@ -48,15 +48,24 @@ Rules:
   and check their claims" is two tasks, and the claims task depends on the
   onboarding task because it needs the customer identified first.
 - Do not invent dependencies between unrelated tasks.
-- Put references in args: customer_ref for CUST-1001, claim_ref for CLM-5001.
+- Put references in args: customer_ref for CUST-1001, claim_ref for CLM-5001,
+  and for a knowledge task the question itself as `question`.
 - A plain question about policy or procedure is a single knowledge task.
 - Most requests need one or two tasks. Never emit more than four.
 
 {existing}"""
 
-EXISTING_PLAN_NOTE = """The session already has these tasks. They are HANDLED — never plan
-them again, whatever the earlier requests say:
-{tasks}"""
+# "HANDLED — never plan them again" was the previous wording, and it named the
+# WORKFLOW as handled rather than the request: with `knowledge.answer_question {}
+# (done)` in the list, a second policy question got an empty plan about half the
+# time (probed twice against the live checkpoint, 2026-09-22: one run planned
+# it, the next planned nothing). The args are listed for the same reason — a
+# task whose args are empty cannot be told apart from a repeat of itself.
+EXISTING_PLAN_NOTE = """These tasks are already done in this session. Do not repeat them:
+{tasks}
+
+A new question, a new customer or a new claim is NEW work and needs a task,
+even in a workflow that has already run. Only an identical request is a repeat."""
 
 # The planner sees earlier requests so a follow-up ("and their claims?") can be
 # resolved, but they are fenced off from the one request it must plan. Handing
