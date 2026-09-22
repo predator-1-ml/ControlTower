@@ -23,7 +23,8 @@ import type { PendingQuestion, Task } from "@/lib/types";
  */
 
 // Workflow identity: a dot beside the printed workflow name — never the only
-// carrier. Exported because the sidebar's legend must use the same colours.
+// carrier. Exported because the Session rows, the turn chips and the empty
+// state's groups must all use the same colours as the task rows.
 export const WORKFLOW_DOT: Record<Task["workflow"], string> = {
   onboarding: "bg-wf-onboarding",
   claims: "bg-wf-claims",

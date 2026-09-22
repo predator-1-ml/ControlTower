@@ -28,7 +28,11 @@ rather than an unembedded corpus.
 This is the assignment's own worked example, verbatim.
 
 **What to point at:** the plan appears in the right-hand panel **before any task
-starts running**, with `t2` showing `waits for t1`. The claims lookup depends on
+starts running**, with `t2` showing `waits for t1`. Above it, the **Session** card
+already lists the three workflows; two of them fill in as the turn ends
+(Onboarding: manual review, Claims: CLM-5001 open) and Knowledge stays "Not used
+yet". The answer's step trail opens with `● Onboarding ● Claims` — the handoff is
+in the transcript, not only the panel. The claims lookup depends on
 the onboarding task because it needs the customer identified first.
 
 That ordering is not cosmetic — the backend emits the `plan` SSE event the moment
@@ -54,7 +58,10 @@ Continue in the **same session**. Do not name the customer:
 **What to point at:** the plan *extends* — `t1` and `t2` are still there, done, and
 a `t3` appears for claims. The claims workflow was never told who "they" is. It
 reads `customer_id`, which the onboarding task published to shared state a turn
-ago. That is context crossing both a turn boundary and a workflow boundary.
+ago. That is context crossing both a turn boundary and a workflow boundary — and
+the Session card's first line, `Customer CUST-1001 Priya Raman`, is where the
+audience sees the context the workflow used. This turn's trail carries only a
+`● Claims` chip: one workflow, picked by the planner.
 
 Then switch to a third workflow:
 

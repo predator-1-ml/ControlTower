@@ -5,10 +5,9 @@ import { flushSync } from "react-dom";
 
 import { ChatPanel } from "@/components/ChatPanel";
 import { Chip, StatusGlyph, TONE } from "@/components/Status";
-import { WORKFLOW_DOT } from "@/components/TaskTimeline";
 import { type LogEntry, WorkflowPanel } from "@/components/WorkflowPanel";
 import { SendError, streamChat } from "@/lib/sse";
-import type { ChatMessage, PendingQuestion, SessionView, Task } from "@/lib/types";
+import type { ChatMessage, PendingQuestion, SessionView, Task, WorkflowStates } from "@/lib/types";
 
 const SESSION_KEY = "control-tower.session";
 
@@ -23,8 +22,6 @@ const RETRY_LIMIT = 40;
 // (4.9:1), not opacity: a faded label is unreadable in a compressed recording.
 const SIDE_BUTTON =
   "w-full rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-sm font-semibold transition-colors duration-150 hover:bg-sunken active:translate-y-px disabled:border-line disabled:bg-sunken disabled:text-ink-3";
-
-const WORKFLOWS = ["onboarding", "claims", "knowledge"] as const;
 
 // "1 tasks" on screen reads as carelessness, and it is on screen in every beat.
 const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
@@ -99,6 +96,9 @@ export function Workspace({ operator }: { operator: string }) {
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  // What each workflow last concluded, from the checkpoint. Read at the end of
+  // a turn and on restore, never streamed: outcomes exist when a turn ends.
+  const [states, setStates] = useState<WorkflowStates>({});
   const [activity, setActivity] = useState<LogEntry[]>([]);
   const [pending, setPending] = useState<PendingQuestion | null>(null);
   const [traceId, setTraceId] = useState<string | null>(null);
@@ -193,6 +193,7 @@ export function Workspace({ operator }: { operator: string }) {
         const session = (await response.json()) as SessionView;
         if (run !== restoreRun.current) return;
         setMessages(session.messages);
+        setStates(session.workflow_states);
         move(() => {
           setTasks(session.plan);
           setPending(session.pending_question);
@@ -228,6 +229,36 @@ export function Workspace({ operator }: { operator: string }) {
     [log],
   );
 
+  /**
+   * Refresh only the workflow outcomes from the checkpoint, at the end of a turn.
+   *
+   * NOT `restore()`: that replaces the transcript, which would erase every step
+   * trail and chip at the end of every turn, and it announces "Session restored"
+   * — true after a refresh, false after an ordinary answer. Silent on failure:
+   * the card keeps the last outcome it saw, and transport problems already
+   * speak in the notice. Guarded by `restoreRun` for the same reason `restore()`
+   * is: a response landing after "New session" must not carry the old
+   * session's outcomes into the new one.
+   *
+   * While a workflow is PAUSED its slice is still inside the subgraph's own
+   * checkpoint; the parent state this reads holds what the session knew when
+   * the turn began. So mid-pause the context line can still name the previous
+   * claim while the row says Needs you (from the task, not the slice). The
+   * slice lands when the resume completes. Verified against the seed
+   * (CLM-5003, 2026-09-22).
+   *
+   * Rejected: a `state` SSE event on every node update. The slice includes the
+   * chunks the knowledge workflow retrieved, the wrong shape for a live channel
+   * for a card that only prints conclusions.
+   */
+  const syncStates = useCallback(async (id: string) => {
+    const run = restoreRun.current;
+    const response = await fetch(`/bff/sessions/${id}`).catch(() => null);
+    if (run !== restoreRun.current || !response?.ok) return;
+    const session = (await response.json()) as SessionView;
+    if (run === restoreRun.current) setStates(session.workflow_states);
+  }, []);
+
   // The id is kept in sessionStorage so a REFRESH returns to the same thread.
   // Held only in React state, a refresh minted a new id: the paused workflow was
   // still safe in Postgres but unreachable, and the question it was waiting on
@@ -261,6 +292,7 @@ export function Workspace({ operator }: { operator: string }) {
     setSessionId(id);
     setMessages([]);
     setTasks([]);
+    setStates({});
     setActivity([]);
     setPending(null);
     setTraceId(null);
@@ -301,13 +333,28 @@ export function Workspace({ operator }: { operator: string }) {
       // assistant turn rather than beside it so it stays attached to the answer
       // it belongs to when the transcript scrolls.
       const steps: string[] = [];
+      // Which workflows this turn touched, first seen first. Fed by BOTH the
+      // plan and the task events: a turn that answers a paused question is a
+      // resume, not a plan (api/chat.py), so it gets no `plan` event, and its
+      // workflow would go unnamed if only the plan were read.
+      const workflows: Task["workflow"][] = [];
+      const noteWorkflow = (workflow: Task["workflow"]) => {
+        if (workflows.includes(workflow)) return false;
+        workflows.push(workflow);
+        return true;
+      };
 
-      // `steps` must be carried on every rewrite: this replaces the whole
-      // message object, so rebuilding it as `{role, text}` dropped the trail on
-      // the first token of every turn.
+      // `steps` and `workflows` must be carried on every rewrite: this replaces
+      // the whole message object, so rebuilding it as `{role, text}` dropped the
+      // trail on the first token of every turn.
       const pushAssistant = (value: string) => {
         setMessages((prev) => {
-          const turn: ChatMessage = { role: "assistant", text: value, steps: [...steps] };
+          const turn: ChatMessage = {
+            role: "assistant",
+            text: value,
+            steps: [...steps],
+            workflows: [...workflows],
+          };
           const last = prev[prev.length - 1];
           return last?.role === "assistant" ? [...prev.slice(0, -1), turn] : [...prev, turn];
         });
@@ -354,6 +401,7 @@ export function Workspace({ operator }: { operator: string }) {
               // The trail opens with the plan, and this is the first thing that
               // creates the assistant turn — so the operator sees the system
               // working before any token arrives, instead of a blank pane.
+              planned.forEach((task) => noteWorkflow(task.workflow));
               steps.push(`Planned ${count(planned.length, "task")}`);
               pushAssistant(streamed);
               log(`plan · ${count(planned.length, "task")}`);
@@ -378,6 +426,9 @@ export function Workspace({ operator }: { operator: string }) {
                   return next;
                 }),
               );
+              // A resume turn learns its workflow here, so the chip must be
+              // pushed now rather than wait for the next step or token.
+              if (noteWorkflow(task.workflow)) pushAssistant(streamed);
               log(`${task.id} ${task.workflow} → ${task.status}`);
               break;
             }
@@ -436,6 +487,12 @@ export function Workspace({ operator }: { operator: string }) {
       } catch (error) {
         failure = error;
       }
+      // On `done` OR `error`: a graph failure ends the stream without `done`
+      // (api/chat.py), and the card would otherwise keep the previous turn's
+      // outcome under a task row that says Failed. Awaited before `busy`
+      // clears so "New session" cannot be pressed while the old session's
+      // outcomes are still in flight.
+      if (terminal && !failure) await syncStates(sessionId);
       setBusy(false);
 
       if (failure instanceof SendError) {
@@ -472,7 +529,7 @@ export function Workspace({ operator }: { operator: string }) {
         void restore(sessionId, "Connection lost mid-run.");
       }
     },
-    [sessionId, pending, log, restore],
+    [sessionId, pending, log, restore, syncStates],
   );
 
   // First match wins, worst news first: a dead backend outranks an open question.
@@ -496,10 +553,11 @@ export function Workspace({ operator }: { operator: string }) {
     // page scrolls instead: three nested scroll areas in 400px is unusable.
     <div className="flex min-h-dvh flex-col lg:grid lg:h-dvh lg:grid-cols-[15rem_minmax(0,1fr)]">
       {/* The sidebar holds only things that are real: what this browser has
-          observed of the backend, the way to start over, which workflows this
-          session has used, who is signed in. No links — there is one screen, and
-          a nav item that leads nowhere is a lie in the UI. Below lg it is a top
-          bar, and the legend is dropped (every task row prints its workflow). */}
+          observed of the backend, the way to start over, who is signed in. No
+          links — there is one screen, and a nav item that leads nowhere is a lie
+          in the UI. Below lg it is a top bar. It used to carry a per-workflow
+          task count; the Session card now says the same thing with an outcome,
+          in one place, at every width. */}
       <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-line px-4 py-3 lg:flex-col lg:flex-nowrap lg:items-stretch lg:gap-y-5 lg:border-b-0 lg:border-r lg:py-5">
         <h1 className="mr-auto text-lg font-bold tracking-tight lg:mr-0">Control Tower</h1>
 
@@ -516,21 +574,6 @@ export function Workspace({ operator }: { operator: string }) {
             New session
           </button>
         </div>
-
-        <section aria-label="Workflows in this session" className="hidden lg:block">
-          <h2 className="text-xs font-semibold text-ink-3">Workflows in this session</h2>
-          <ul className="mt-2 space-y-1.5 text-sm">
-            {WORKFLOWS.map((workflow) => (
-              <li key={workflow} className="flex items-center gap-2">
-                <span aria-hidden="true" className={`h-2 w-2 rounded-full ${WORKFLOW_DOT[workflow]}`} />
-                <span className="capitalize">{workflow}</span>
-                <span className="figures ml-auto text-ink-2">
-                  {count(tasks.filter((task) => task.workflow === workflow).length, "task")}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </section>
 
         <div className="flex items-center gap-3 lg:mt-auto lg:flex-col lg:items-stretch lg:gap-2 lg:border-t lg:border-line lg:pt-4">
           <p className="hidden text-sm sm:block">
@@ -589,8 +632,10 @@ export function Workspace({ operator }: { operator: string }) {
           />
           <WorkflowPanel
             tasks={tasks}
+            states={states}
             pending={pending}
             live={busy}
+            connecting={conn !== "ready"}
             activity={activity}
             sessionId={sessionId}
             traceId={traceId}

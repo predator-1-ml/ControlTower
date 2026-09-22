@@ -3,17 +3,32 @@
 import { useEffect, useRef } from "react";
 
 import { StatusGlyph } from "@/components/Status";
-import type { ChatMessage, PendingQuestion } from "@/lib/types";
+import { WORKFLOW_DOT } from "@/components/TaskTimeline";
+import type { ChatMessage, PendingQuestion, Task } from "@/lib/types";
 
-// Copied verbatim from docs/demo.md so the screen and the demo script cannot
-// disagree. Each opens a different branch; the hint says which, so the presenter
-// can pick a beat without remembering customer ids.
-const PROMPTS = [
-  ["Onboard CUST-1001 and check whether they already have an active claim.", "plans two tasks"],
-  ["Summarise claim CLM-5003.", "pauses for missing details"],
-  ["When does a motor claim need a second review?", "knowledge, with citations"],
-  ["Onboard CUST-1002", "pauses for documents — the crash-resume beat"],
-] as const;
+// One request per workflow, each the first request docs/demo.md makes of that
+// workflow, so the screen and the script cannot disagree. Grouped by workflow so
+// a reviewer with no narration sees what the three are before typing. Only the
+// claims request pauses; two pausing first requests would lock the session on
+// a question twice. "Onboard CUST-1002" (the crash beat) needs a backend to
+// kill and stays in the narrated demo.
+const PROMPTS: { workflow: Task["workflow"]; prompt: string; hint: string }[] = [
+  {
+    workflow: "onboarding",
+    prompt: "Onboard CUST-1001 and check whether they already have an active claim.",
+    hint: "plans two tasks, one for each workflow, before either runs",
+  },
+  {
+    workflow: "claims",
+    prompt: "Summarise claim CLM-5003.",
+    hint: "pauses to ask for what the claim is missing",
+  },
+  {
+    workflow: "knowledge",
+    prompt: "When does a motor claim need a second review?",
+    hint: "answers from the policy documents, with citations",
+  },
+];
 
 // ONE column for the whole pane: the heading, every turn, the question and the
 // composer share its two edges. Without it the operator's bubbles hugged the
@@ -127,13 +142,20 @@ export function ChatPanel({
             <div>
               <p className="text-2xl font-semibold tracking-tight">Start with a request.</p>
               <p className="mt-1 text-ink-2">
-                Say what you need in plain words. The plan appears on the right before anything runs.
+                One conversation over three workflows. Say what you need in plain words; the plan
+                appears on the right before anything runs.
               </p>
               {/* -mx-2 here + px-2 on the buttons: the hover band gets breathing
                   room while the prompt text stays on the heading's left edge. */}
               <ul className="-mx-2 mt-6 border-b border-line">
-                {PROMPTS.map(([prompt, hint]) => (
-                  <li key={prompt} className="border-t border-line">
+                {PROMPTS.map(({ workflow, prompt, hint }) => (
+                  <li key={workflow} className="border-t border-line py-2.5">
+                    {/* The group's name is not pressable, so it takes no accent
+                        (globals.css, rule 2); the dot never stands alone. */}
+                    <p className="flex items-center gap-2 px-2 text-sm font-semibold">
+                      <span aria-hidden="true" className={`h-2 w-2 rounded-full ${WORKFLOW_DOT[workflow]}`} />
+                      <span className="capitalize">{workflow}</span>
+                    </p>
                     {/* Fills the composer; does NOT send. The operator stays in
                         control, and a presenter can narrate before pressing Enter. */}
                     <button
@@ -142,7 +164,7 @@ export function ChatPanel({
                         onDraft(prompt);
                         inputRef.current?.focus();
                       }}
-                      className="w-full rounded-lg px-2 py-2.5 text-left transition-colors duration-150 hover:bg-sunken"
+                      className="mt-1 w-full rounded-lg px-2 py-1.5 text-left transition-colors duration-150 hover:bg-sunken"
                     >
                       {/* Accent: it is pressable, and it is what the OPERATOR
                           would write (globals.css, rule 2). */}
@@ -152,6 +174,15 @@ export function ChatPanel({
                   </li>
                 ))}
               </ul>
+              {/* The path across all three: what a reviewer alone with the app
+                  would not guess, and the one that shows the plan growing and
+                  the customer carrying over between workflows (docs/demo.md,
+                  Beat 2). Prose, not a button: it is three requests, not one. */}
+              <p className="mt-4 text-sm text-ink-2">
+                They work in one session: onboard first, then ask &ldquo;Do they have any other open
+                claims?&rdquo;, then the policy question. The plan grows each time and the customer
+                carries over without being named again.
+              </p>
             </div>
           )}
 
@@ -188,13 +219,29 @@ export function ChatPanel({
                         the prose — the answer below is only the answer. One
                         wrapping line of plain text, not a component: it is a
                         sentence, and a row of pills would compete with the
-                        question card for attention. */}
-                    {message.steps && message.steps.length > 0 && (
+                        question card for attention.
+
+                        It opens with the workflow(s) that ran this turn, as dot
+                        + name (the same pair the task rows print; not a pill,
+                        which would say "status"), so the transcript itself
+                        reads as a sequence of handoffs — the brief's "moves
+                        between workflows" is then visible without the panel. */}
+                    {((message.steps?.length ?? 0) > 0 || (message.workflows?.length ?? 0) > 0) && (
                       <p className="mb-1.5 flex flex-wrap items-center gap-x-1.5 text-sm text-ink-2">
                         {busy && index === messages.length - 1 && (
                           <StatusGlyph glyph="arc" className="h-3.5 w-3.5" />
                         )}
-                        {message.steps.join(" › ")}
+                        {message.workflows?.map((workflow) => (
+                          <span key={workflow} className="inline-flex items-center gap-1.5 font-medium text-ink">
+                            <span aria-hidden="true" className={`h-2 w-2 rounded-full ${WORKFLOW_DOT[workflow]}`} />
+                            <span className="capitalize">{workflow}</span>
+                          </span>
+                        ))}
+                        {/* One string, separator included: adjacent JSX text
+                            nodes merge into one flex item, so a separate "›"
+                            landed glued to the first step. */}
+                        {(message.steps?.length ?? 0) > 0 &&
+                          ((message.workflows?.length ?? 0) > 0 ? "› " : "") + message.steps!.join(" › ")}
                       </p>
                     )}
                     {/* `printing` adds the caret to the turn that is still growing.

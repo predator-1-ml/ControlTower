@@ -43,6 +43,8 @@ Three rules carry the whole interface:
 | Soft glassy pastel CRM (the RonDesignLab shots) | Blur smears in a compressed recording and its contrast does not reach AA. |
 | Dark sidebar, light content | A second ground to tune contrast on, for no information. |
 | Flight Progress Strips (the previous build) | A metaphor to learn before the screen can be read. |
+| Structured record cards under each answer (onboarding result, claim record) | A new payload shape or prose parsing, a duplicate of the answer, and lost on restore. The Session card shows the same facts from the checkpoint. |
+| One tab per workflow in the right column | Hides two of three at any moment — the opposite of showing that all three are covered. |
 
 ---
 
@@ -112,30 +114,33 @@ ink-tinted. Disabled controls are an explicit grey pair (`sunken` / `ink-3`,
 ```
 ≥1024px                                                    fixed height, panes scroll
 ┌────────────┬──────────────────────────────────────────┬──────────────────────┐
-│ Control    │ Conversation                             │ ┌ Plan   1 of 2 done ┐│
-│ Tower      ├──────────────────────────────────────────┤ │ (t1) Onboard  ✓Done ││
-│ [● status] │        ┌──── 48rem column ─────┐         │ │  │                  ││
-│ [New       │        │      [ operator msg ] │         │ │ (t2) Retrieve ⏸Needs││
-│  session]  │        │ (CT) Control Tower    │         │ └────────────────────┘│
-│            │        │      answer text      │         │ ┌ ▾ Activity ────────┐│
-│ Workflows  │        │ ┌ Claims needs an     │         │ │ 22:09:07 plan · 2   ││
-│ ● Onboard 1│        │ │ answer from you     │         │ └────────────────────┘│
-│ ● Claims  1│        │ └─────────────────────│         │                      │
-│ ● Knowl.  0│        └───────────────────────┘         │                      │
+│ Control    │ Conversation                             │ ┌ Session ───────────┐│
+│ Tower      ├──────────────────────────────────────────┤ │ Customer CUST-1001 ││
+│ [● status] │        ┌──── 48rem column ─────┐         │ │ ● Onboarding Manual││
+│ [New       │        │      [ operator msg ] │         │ │ ● Claims   Needs you││
+│  session]  │        │ (CT) Control Tower    │         │ │ ● Knowledge Not used││
+│            │        │  ● Onboarding ● Claims│         │ └────────────────────┘│
+│            │        │  › Planned 2 tasks …  │         │ ┌ Plan   1 of 2 done ┐│
+│            │        │      answer text      │         │ │ (t1) Onboard  ✓Done ││
+│            │        │ ┌ Claims needs an     │         │ │ (t2) Retrieve ⏸Needs││
+│            │        │ │ answer from you     │         │ └────────────────────┘│
+│            │        │ └─────────────────────│         │ ┌ ▾ Activity ────────┐│
+│            │        └───────────────────────┘         │ └────────────────────┘│
 │            ├──────────────────────────────────────────┤ session …            │
 │ operator   │        [ write a request…     ] [Send]   │ trace …              │
 │ [Sign out] │                                          │                      │
 └── 15rem ───┴──────────────────────────────────────────┴──────── 25rem ───────┘
 
 <1024px: the page scrolls; the sidebar becomes a top bar (name, status, New session,
-Sign out; the workflow legend is dropped because every row prints its workflow).
-Order: top bar → notice → PLAN → conversation → activity → ids. Composer is sticky.
+Sign out). Order: top bar → notice → SESSION → PLAN → conversation → activity → ids.
+Composer is sticky.
 ```
 
 The sidebar has no navigation links: there is one screen, and a link that leads
 nowhere is a lie in the UI. It holds only things that are real — what this browser
-has observed of the backend, the way to start over, which workflows this session
-has used (live counts from the plan), who is signed in.
+has observed of the backend, the way to start over, who is signed in. It used to
+carry a per-workflow task count, hidden on a phone; the Session card replaced it
+with an outcome per workflow, at every width.
 
 The conversation is **one centred 48rem column** shared by the heading, every turn,
 the question card and the composer. Without it the operator's bubbles hugged the
@@ -185,19 +190,38 @@ a marketing panel — there is nothing true to put in it.
 **Conversation (`ChatPanel.tsx`)** — the white column. The operator's turns are
 accent-on-wash bubbles, right-aligned; the system's are named ("Control Tower", a
 round CT badge) and unboxed, so every answer starts from the same left edge. Under
-the name, a quiet **step trail** — `Planned 1 task › looked up the claim › needs your
-answer`, a spinning arc while the turn is live — so process is *shown* and the answer
-below is only the answer. A turn that paused has a trail and no text at all. Record
+the name, a quiet **step trail** — `● Claims › Planned 1 task › looked up the claim ›
+needs your answer`, a spinning arc while the turn is live — so process is *shown* and
+the answer below is only the answer. The trail opens with the workflow(s) that ran the
+turn, as the same dot + name the task rows print (not a pill: pills mean status), so
+the transcript alone reads as a sequence of handoffs between Onboarding, Claims and
+Knowledge — the brief's "moves between workflows", visible without the panel. A turn that paused has a trail and no text at all. Record
 ids (`CUST-1001`, `CLM-5003`) and citations (`[claims-handling-policy.md, Escalation]`)
 are marked inline and never wrap, so a long answer can be scanned for which customer,
-which claim, and where a statement came from. The empty state offers the demo
-script's requests as fill-the-composer buttons — they do not send, so a presenter
-can narrate first. When a workflow holds, its question is the **largest thing in the
+which claim, and where a statement came from. The empty state is organised as the
+three workflows: a dot + name group each (not pressable, so no accent), one
+fill-the-composer request each from the demo script, and beneath them the path that
+crosses all three in one session — the thing a reviewer alone with the app would not
+guess. The buttons do not send, so a presenter can narrate first. When a workflow holds, its question is the **largest thing in the
 conversation** (scale follows urgency), the input gains an amber ring, and the button
 turns amber and says **Send answer** — because the next message *is* the answer and
 cannot be anything else (`docs/tradeoffs.md`). The card says *where* to answer (the
 composer is at the foot of a tall pane and a placeholder alone was missed) and
 carries the one way out, **I don't have this yet**, which sends an empty answer.
+
+**Session (`WorkflowPanel.tsx`)** — the coverage view, its own card above the plan.
+One line for who the session is about (customer and claims, from the checkpoint's
+`workflow_states`), then three fixed rows in the brief's order — Onboarding, Claims,
+Knowledge — each with what that workflow last concluded ("Manual review · existing
+active claim(s): CLM-5001", "CLM-5003 under review", "Answered from 4 passages") or
+"Not used yet", which is the invitation. A row is the *latest task* of its workflow,
+summarised through the same `displayStatus` the timeline uses, so it says Needs you or
+Last seen running exactly when the task row does; only a finished task reads its
+outcome. Rows are plain text, not chips: the row is a fact line, the timeline below
+is the status machine, and a second amber element in the column would dilute the one
+that needs a person. Outcomes are refetched from `GET /sessions/{id}` when a turn
+ends (`done` or `error`), never streamed, and survive a refresh because they come
+from the checkpoint — unlike the trail.
 
 **Plan (`TaskTimeline.tsx`, `WorkflowPanel.tsx`)** — one row per task in **plan
 order, never re-sorted**: "after t1" always points up the joining line. Row anatomy:

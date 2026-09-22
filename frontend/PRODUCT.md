@@ -72,7 +72,10 @@ Postgres, not in the process or the browser.
   browser-observed, so a restored turn has none — the durable record is `audit_events`.
 - The backend never reports "needs input" as a task status; the frontend derives it
   (`components/Status.tsx::displayStatus`). Keep that function and `restore()` in
-  `app/page.tsx` — they are verified behaviour, not styling.
+  `components/Workspace.tsx` — they are verified behaviour, not styling.
+- `GET /sessions/{id}` also returns `workflow_states`, what each workflow last
+  concluded. The Session card reads it at the end of every turn and on restore; it
+  is the only place the three workflows are shown side by side with an outcome.
 - Every line must be explainable in an interview (`/CLAUDE.md`): small surface,
   why-comments, rejected alternatives recorded at the decision site.
 
