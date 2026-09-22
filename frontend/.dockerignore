@@ -1,0 +1,4 @@
+# Without this, `COPY . .` sends the host's node_modules (Windows binaries, hundreds of MB) and stale .next into the build context, overwriting what `npm ci` installed in the deps stage.
+node_modules
+.next
+*.tsbuildinfo

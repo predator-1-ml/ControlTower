@@ -1,61 +1,102 @@
 "use client";
 
+import { useEffect, useRef } from "react";
+
 import { TaskTimeline } from "@/components/TaskTimeline";
-import type { Task } from "@/lib/types";
+import type { PendingQuestion, Task } from "@/lib/types";
+
+/** One line of the activity log. `at` is this browser's clock, HH:MM:SS. */
+export type LogEntry = { at: string; text: string };
+
+// One card: white surface, hairline, the single shadow. Two uses, both here.
+const CARD = "rounded-lg border border-line bg-surface p-4 shadow-card";
 
 /**
- * Right-hand operational view: the plan, plus a live activity log.
+ * The right-hand column: the plan, the activity log, and the ids.
  *
- * The log is fed by the `progress` SSE event, which carries per-node updates the
- * graph emits as it runs. Without it a long multi-workflow run looks identical
- * to a hung one — the assignment asks for workflow visibility and task tracking,
- * and "the spinner is still spinning" is neither.
+ * The log is written by the workspace from the SSE events it receives (`plan`,
+ * `task`, `interrupt`, `final`, `error`) plus what the browser itself did (sent,
+ * lost the stream, restored). Without it a long multi-workflow run looks
+ * identical to a hung one. Identical timestamps on `plan` and the first
+ * `→ running` line are the on-screen proof that planning came first.
+ *
+ * It is browser-only and not replayed after a restore — the durable record is
+ * `audit_events`, joined by the trace id at the foot.
  */
 export function WorkflowPanel({
   tasks,
+  pending,
+  live,
   activity,
   sessionId,
   traceId,
 }: {
   tasks: Task[];
-  activity: string[];
+  pending: PendingQuestion | null;
+  live: boolean;
+  activity: LogEntry[];
   sessionId: string;
   traceId: string | null;
 }) {
+  // Newest entry is last, so keep the log pinned to its end; otherwise the line
+  // that explains what just happened is the one below the fold.
+  const logRef = useRef<HTMLOListElement>(null);
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [activity]);
+
   const done = tasks.filter((task) => task.status === "done").length;
 
   return (
-    <aside className="flex h-full flex-col gap-4 overflow-y-auto">
-      <section>
-        <header className="mb-2 flex items-baseline justify-between">
-          <h2 className="text-sm font-semibold text-slate-700">Plan</h2>
+    // `contents` below lg: on a phone the aside's children join the page's own
+    // column, so `order` can put the plan ABOVE the conversation and the log
+    // below it — the plan is short and it is the evidence; under the transcript
+    // it would never be seen. On desktop the aside is an ordinary right-hand pane.
+    <aside className="contents lg:flex lg:min-h-0 lg:flex-col lg:gap-4 lg:overflow-y-auto lg:border-l lg:border-line lg:p-4">
+      <section aria-label="Plan" className={`order-1 m-4 lg:m-0 ${CARD}`}>
+        <header className="mb-4 flex items-baseline justify-between gap-3">
+          <h2 className="font-semibold">Plan</h2>
           {tasks.length > 0 && (
-            <span className="text-xs text-slate-500">
-              {done}/{tasks.length} complete
-            </span>
+            <p className="figures text-sm text-ink-2">
+              {done} of {tasks.length} done
+            </p>
           )}
         </header>
-        <TaskTimeline tasks={tasks} />
+        <TaskTimeline tasks={tasks} pending={pending} live={live} />
       </section>
 
-      <section>
-        <h2 className="mb-2 text-sm font-semibold text-slate-700">Activity</h2>
+      {/* Native <details>: collapse, keyboard support and the open/closed state
+          all come from the browser — no React state to explain. */}
+      <details open className={`order-3 m-4 lg:m-0 ${CARD}`}>
+        <summary className="cursor-pointer font-semibold">Activity</summary>
         {activity.length === 0 ? (
-          <p className="text-sm text-slate-400">Nothing yet.</p>
+          <p className="mt-2 text-sm text-ink-2">
+            Nothing logged in this tab yet. Each event is timed as it arrives.
+          </p>
         ) : (
-          <ul className="space-y-1 font-mono text-xs text-slate-600">
-            {activity.slice(-12).map((line, index) => (
-              <li key={index}>{line}</li>
+          <ol ref={logRef} className="mt-2 max-h-64 space-y-1 overflow-y-auto text-sm">
+            {activity.map((entry, index) => (
+              <li key={index} className="flex gap-3">
+                <time className="figures shrink-0 text-ink-3">{entry.at}</time>
+                <span className="min-w-0 text-ink-2">{entry.text}</span>
+              </li>
             ))}
-          </ul>
+          </ol>
         )}
-      </section>
+      </details>
 
-      <footer className="mt-auto border-t border-slate-200 pt-3 font-mono text-[11px] text-slate-400">
-        <p>session {sessionId}</p>
-        {/* Surfaced deliberately: this is the id that joins a run to its
-            audit_events rows, so a problem seen on screen is traceable. */}
-        {traceId && <p>trace {traceId}</p>}
+      {/* Full length and select-all, deliberately: docs/demo.md has the presenter
+          paste the trace id into SQL to join a run to its audit_events rows. */}
+      <footer className="figures order-4 mt-auto px-4 pb-4 text-xs text-ink-2 lg:px-1 lg:pb-0">
+        <p>
+          session <span className="select-all break-all">{sessionId}</span>
+        </p>
+        {traceId && (
+          <p>
+            trace <span className="select-all break-all">{traceId}</span>
+          </p>
+        )}
       </footer>
     </aside>
   );

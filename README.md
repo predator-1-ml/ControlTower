@@ -15,12 +15,12 @@ Terraform-provisioned AWS infrastructure on ECS Fargate.
 | **Workflows** | Onboarding (deterministic), Claims (tool-driven), Knowledge (RAG) |
 | **Durability** | Postgres checkpointing; workflows resume after the process dies |
 | **API** | SSE streaming, session reconnect |
-| **Frontend** | Chat, live plan DAG, activity log |
+| **Frontend** | Operator sign-in, conversation, the plan as an activity timeline, activity log — see [`frontend/DESIGN.md`](frontend/DESIGN.md) |
 | **Infrastructure** | Terraform: VPC, 2 ALBs, ECS Fargate, RDS+pgvector, Route 53 private zone |
 | **CI/CD** | 5 GitHub Actions workflows, OIDC, no long-lived keys |
 
-**66 tests (46 without a database) · ruff clean · typecheck clean ·
-`terraform validate` clean across 8 stacks · both Docker images build and run**
+**70 tests (49 without a database) · ruff clean ·
+`terraform validate` clean across 8 modules + the dev environment · both Docker images build and run**
 
 Verified rather than asserted: durable execution across real process death, and
 the full container-to-container path over the private DNS name the Route 53 zone
@@ -45,7 +45,9 @@ Then run it:
 
 ```bash
 make dev                      # backend on :8000
-cd frontend && npm run dev    # frontend on :3000
+cd frontend && npm run dev    # frontend on :3000 — needs OPERATOR_USERNAME,
+                              # OPERATOR_PASSWORD and SESSION_SECRET set (.env.example);
+                              # unset, sign-in fails closed. docker compose sets local ones.
 ```
 
 Needs an LLM credential: either `ANTHROPIC_API_KEY` in `backend/.env`, or
@@ -85,11 +87,11 @@ This is what makes ECS tasks disposable, and it is the third beat of the demo.
 ## Architecture at a glance
 
 ```
-Browser ──TLS──▶ Public ALB ──▶ Next.js (ECS Fargate)   ← only public target
+Browser ─HTTP─▶ Public ALB ──▶ Next.js (ECS Fargate)    ← only public target
                                      │
                                      │  BFF proxy, private DNS
                                      ▼
-                          http://api.internal:8000
+                   http://api.control-tower.internal:8000
                                      │
                                 Internal ALB
                                      ▼
@@ -122,6 +124,7 @@ environment. See ADR-001 in the plan.
 | `backend/app/db/` | Connection pool and checkpointer wiring |
 | `backend/app/scripts/` | One-off migration and verification entrypoints |
 | `frontend/app/bff/` | The BFF proxy (ADR-001) |
+| `frontend/proxy.ts`, `frontend/lib/session.ts` | Static operator sign-in: signed httpOnly cookie, guard in front of the pages and `/bff/*` |
 | `terraform/` | Modules + `environments/dev` |
 | `docs/` | Architecture, networking, state management, tradeoffs |
 
