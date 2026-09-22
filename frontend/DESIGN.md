@@ -195,7 +195,9 @@ script's requests as fill-the-composer buttons — they do not send, so a presen
 can narrate first. When a workflow holds, its question is the **largest thing in the
 conversation** (scale follows urgency), the input gains an amber ring, and the button
 turns amber and says **Send answer** — because the next message *is* the answer and
-cannot be anything else (`docs/tradeoffs.md`).
+cannot be anything else (`docs/tradeoffs.md`). The card says *where* to answer (the
+composer is at the foot of a tall pane and a placeholder alone was missed) and
+carries the one way out, **I don't have this yet**, which sends an empty answer.
 
 **Plan (`TaskTimeline.tsx`, `WorkflowPanel.tsx`)** — one row per task in **plan
 order, never re-sorted**: "after t1" always points up the joining line. Row anatomy:

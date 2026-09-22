@@ -17,6 +17,7 @@ import pytest
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.runtime import Runtime
+from langgraph.types import Command
 
 from app.api.streaming import translate
 from app.db import repository
@@ -494,6 +495,40 @@ async def test_failed_identity_routes_to_manual_review():
     onboarding = result["workflow_states"]["onboarding"]
     assert onboarding["outcome"] == "manual_review"
     assert "identity verification failed" in onboarding["review_reason"]
+
+
+async def test_a_skipped_documents_request_does_not_verify_identity(monkeypatch):
+    """Before this, ANY reply to the documents pause set kyc to verified.
+
+    An empty answer is the operator's explicit skip (api/chat.py): identity stays
+    unverified and the application goes to a person, with the reason recorded.
+    The shared stub's CUST-1002 is `verified` (it never pauses), so this test
+    supplies an unverified one.
+    """
+    async def get_customer(_pool, ref):
+        return {"id": "id-1002", "external_ref": ref, "full_name": "Daniel Okafor",
+                "email": "d@example.com", "date_of_birth": "1995-11-03",
+                "kyc_status": "unverified"}
+
+    monkeypatch.setattr(repository, "get_customer", get_customer)
+    plan = Plan(goal="onboard", tasks=[
+        PlanTask(id="1", workflow="onboarding", action="onboard_customer",
+                 args={"customer_ref": "CUST-1002"})
+    ])
+    graph = build_graph(checkpointer=InMemorySaver())
+    config = cfg("skip-docs")
+    paused = await graph.ainvoke(
+        state_with("onboard CUST-1002"), config, context=deps(StubModel(plan))
+    )
+    assert paused["__interrupt__"][0].value["kind"] == "need_documents"
+
+    result = await graph.ainvoke(Command(resume=""), config, context=deps(StubModel(plan)))
+
+    onboarding = result["workflow_states"]["onboarding"]
+    assert onboarding["kyc"] != "verified"
+    assert onboarding["outcome"] == "manual_review"
+    assert onboarding["review_reason"] == "identity documents not supplied"
+    assert result["plan"][0].status is TaskStatus.DONE
 
 
 async def test_unknown_customer_is_handled_not_crashed():

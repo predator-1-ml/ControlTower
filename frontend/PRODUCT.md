@@ -51,7 +51,9 @@ Postgres, not in the process or the browser.
 - The knowledge workflow answers from internal policy documents and cites
   `[source, section]`.
 - While a workflow is paused, the next message IS the answer to its question — the
-  interface must make that unmistakable, because it cannot be undone.
+  interface must make that unmistakable, because it cannot be undone. The only other
+  move is an explicit skip ("I don't have this yet"), which ends the pause with
+  nothing supplied.
 
 ## Capabilities and Constraints
 

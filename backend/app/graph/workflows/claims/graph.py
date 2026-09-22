@@ -299,6 +299,10 @@ async def request_information(state: ControlTowerState) -> dict[str, Any]:
     return {"workflow_states": _merge_claims_state(state, reply=reply)}
 
 
+class _Skipped(Exception):
+    """Control flow only: leaves `read_reply`'s try with nothing extracted."""
+
+
 def _normalise(text: str) -> str:
     return " ".join(str(text).split()).casefold()
 
@@ -350,7 +354,13 @@ async def read_reply(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[s
 
     supplied_now: dict[str, str] = {}
     failure: str | None = None
+    # An empty reply is the operator's explicit "I do not have this yet"
+    # (api/chat.py). The model is not asked to read nothing: the Phase 0 probe
+    # showed it invents references when the reply contains none.
+    skipped = not reply.strip()
     try:
+        if skipped:
+            raise _Skipped
         extractor = runtime.context.model.with_structured_output(Reply, include_raw=True)
         result = await extractor.ainvoke(
             [
@@ -363,6 +373,8 @@ async def read_reply(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[s
             failure = str(result.get("parsing_error"))[:500]
         else:
             supplied_now = _verified(parsed.supplied, missing, reply)
+    except _Skipped:
+        pass
     except Exception as exc:  # noqa: BLE001 - see docstring
         failure = f"{type(exc).__name__}: {exc}"[:500]
 

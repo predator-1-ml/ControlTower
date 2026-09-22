@@ -67,6 +67,7 @@ export function ChatPanel({
   draft,
   onDraft,
   onSend,
+  onSkip,
 }: {
   messages: ChatMessage[];
   pending: PendingQuestion | null;
@@ -77,6 +78,8 @@ export function ChatPanel({
   draft: string;
   onDraft: (text: string) => void;
   onSend: (text: string) => void;
+  /** Answer the open question with nothing: the workflow ends without it. */
+  onSkip: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -243,10 +246,24 @@ export function ChatPanel({
                     Needed: {pending.fields.map((field) => field.replaceAll("_", " ")).join(" · ")}
                   </p>
                 )}
+                {/* Says WHERE to answer: the composer is at the foot of a tall
+                    pane and a placeholder alone was missed. The question is saved
+                    in the checkpoint, so it survives a refresh or a backend restart. */}
                 <p className="text-sm">
-                  Your reply resumes the workflow from this step. The question is saved in the
-                  checkpoint, so it survives a refresh or a backend restart.
+                  Type your answer in the box below and press <strong>Send answer</strong>. Your
+                  next message is taken as the answer, not as a new request.
                 </p>
+                {/* The way out. Without it any message the operator typed — even
+                    a new request — was consumed as the answer. A skip sends an
+                    empty answer; the workflow records nothing and ends. */}
+                <button
+                  type="button"
+                  onClick={onSkip}
+                  disabled={busy}
+                  className="rounded-lg border border-hold bg-surface px-3 py-1.5 text-sm font-semibold transition-colors duration-150 hover:bg-hold-wash active:translate-y-px disabled:border-line disabled:text-ink-3"
+                >
+                  I don&apos;t have this yet
+                </button>
               </div>
             </div>
           )}
@@ -277,7 +294,7 @@ export function ChatPanel({
               connecting
                 ? "Connecting…"
                 : pending
-                  ? `Answer to resume ${pending.workflow}…`
+                  ? "Type your answer here…"
                   : "Write a request…"
             }
             // The border is always 1px and the hold state adds a ring, so the box

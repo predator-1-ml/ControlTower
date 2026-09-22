@@ -125,9 +125,18 @@ parked on `interrupt()`, `/chat` delivers the message as `Command(resume=...)`
 without consulting the planner — re-planning over a paused workflow would throw
 away what was just typed.
 **Cost:** a question cannot be parked. "Actually, do something else first" is
-consumed as the answer to the open question. The fix is a classifier in front of
-the resume (answer vs. new request), which is an LLM judgement on the one path
-that is currently deterministic — not worth it at this scale.
+consumed as the answer to the open question. The fix would be a classifier in
+front of the resume (answer vs. new request), which is an LLM judgement on the one
+path that is currently deterministic — not worth it at this scale.
+
+What the operator gets instead is a way **out**: "I don't have this yet" on the
+question card sends an **empty answer**, and every pausing node reads an empty
+answer as nothing supplied — claims ends the pause without calling the model, and
+an onboarding documents request no longer verifies identity on it (it goes to
+manual review with the reason recorded). Empty is unambiguous on the wire because
+the composer will not send an empty message any other way; on a fresh turn `/chat`
+rejects it. Rejected: a `skip` flag on the request — a second way to say the same
+thing.
 
 In claims this is now at least *visible*: a new request typed at the pause
 extracts nothing, so the pause ends and the answer says the reply contained none

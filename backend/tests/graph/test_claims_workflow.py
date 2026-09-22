@@ -335,6 +335,27 @@ async def test_a_reply_that_supplies_nothing_ends_the_pause_honestly(db_returns)
     assert result["plan"][0].status is TaskStatus.DONE
 
 
+async def test_an_explicit_skip_ends_the_pause_without_asking_the_model(db_returns):
+    """An empty answer is the operator's "I don't have this yet" (api/chat.py).
+
+    The model is NOT asked to read it: the Nova Pro probe showed it invents
+    references when the reply contains none, and the verification guard would
+    still accept a value like "this" if the reply happened to contain it.
+    """
+    graph, config, written = resumable(db_returns, [dict(CLAIM_INCOMPLETE)])
+    model = StubModel(fields=[("incident_report", "IR-1")])  # would lie, if asked
+    await graph.ainvoke(make_state(), config, context=deps(model))
+
+    result = await graph.ainvoke(Command(resume=""), config, context=deps(model))
+
+    claims_state = result["workflow_states"]["claims"]
+    assert "__interrupt__" not in result
+    assert not any("Reply" in c or "supplied" in c for c in model.calls), "no extraction call"
+    assert written == []
+    assert claims_state["outcome"] == "information_incomplete"
+    assert result["plan"][0].status is TaskStatus.DONE
+
+
 async def test_an_invented_value_is_discarded(db_returns):
     """The verification step, with a lying stub.
 

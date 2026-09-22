@@ -275,12 +275,22 @@ export function Workspace({ operator }: { operator: string }) {
       // Sending without it would start a graph run on an empty thread_id.
       if (!sessionId) return;
 
-      setMessages((prev) => [...prev, { role: "user", text }]);
+      // An empty text is the explicit skip ("I don't have this yet"); the
+      // backend reads an empty answer as nothing supplied (api/chat.py). It is
+      // shown as words so the transcript does not carry a blank bubble.
+      const skipping = text === "";
+      setMessages((prev) => [...prev, { role: "user", text: skipping ? "Skipped for now." : text }]);
       setDraft("");
       setBusy(true);
       // "sending", not "sent": at this point nothing has been observed, and a
       // log that says "sent" and then "not sent" one line later contradicts itself.
-      log(pending ? `sending answer · resuming ${pending.workflow}` : "sending · planning");
+      log(
+        skipping
+          ? `skipping · resuming ${pending?.workflow} with nothing`
+          : pending
+            ? `sending answer · resuming ${pending.workflow}`
+            : "sending · planning",
+      );
 
       // Assistant text arrives as `token` fragments; accumulate locally and
       // replace with the authoritative `final` when it lands.
@@ -575,6 +585,7 @@ export function Workspace({ operator }: { operator: string }) {
             draft={draft}
             onDraft={setDraft}
             onSend={send}
+            onSkip={() => void send("")}
           />
           <WorkflowPanel
             tasks={tasks}

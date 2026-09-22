@@ -46,6 +46,13 @@ async def chat(request: Request, body: ChatRequest) -> EventSourceResponse:
     `Command(resume=...)`. Running the planner instead would re-plan over a paused
     workflow and discard the answer the user just typed — the single most
     destructive ordering mistake available here.
+
+    **An empty message on a resume is an explicit skip**: "I do not have this
+    yet". Every pausing node treats an empty answer as nothing supplied, which is
+    the only honest reading of it. It is unambiguous on the wire because the
+    composer refuses to send an empty message any other way. On a fresh turn an
+    empty message is rejected: there is nothing to plan. Rejected: a `skip`
+    flag on the request — a second way to say the same thing.
     """
     graph = request.app.state.graph
     deps = request.app.state.deps
@@ -56,6 +63,8 @@ async def chat(request: Request, body: ChatRequest) -> EventSourceResponse:
 
     snapshot = await graph.aget_state(config)
     resuming = bool(snapshot.interrupts)
+    if not resuming and not body.message.strip():
+        raise HTTPException(status_code=422, detail="message is empty and nothing is paused")
 
     if resuming:
         payload: Any = Command(resume=body.message)
