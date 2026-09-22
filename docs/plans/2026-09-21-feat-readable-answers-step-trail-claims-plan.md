@@ -381,11 +381,27 @@ attempts) failed identically:
 
 The host `aws login` session had expired, and re-authenticating is interactive and
 would have killed the container's session too (CLAUDE.md: refresh tokens are
-single use). So **`Reply` is unproven against Nova Pro** — the schema is the
+single use). So at that point `Reply` was unproven against Nova Pro — the schema is the
 planner's proven pattern (`with_structured_output(..., include_raw=True)`, a flat
 list of pairs) but the extraction quality is a gap to close before the demo.
 
-The probe was not wasted. It failed by **raising out of `ainvoke`**, not by
+**Re-run 2026-09-22 after a fresh `aws login`, inside the container, two attempts
+per input:**
+
+| Reply | Attempt 1 | Attempt 2 |
+|---|---|---|
+| "Incident report IR-2291, police ref PR-77431" | both pairs, verbatim | same |
+| "the police reference is PR-77431, still chasing the report" | `police_reference=PR-77431` only | same |
+| "what does this claim need again?" | `incident_report="None provided."`, `police_reference="Still pending from the police."` | `incident_report="Incident report #2023-123456 was filed on June 15, 2023."`, `police_reference="Police reference number ABC-12345 …"` |
+
+So the schema fills reliably when the reply contains the values, and **Nova Pro
+invents values when it does not**, despite "Never guess a value" and an empty list
+being allowed. That is the evidence for `_verified`: every invented value above
+fails the "occurs in the operator's words" check and is dropped, so the off-topic
+reply correctly ends the pause with nothing recorded. The guard is not defensive
+theory; it fired on the first real probe.
+
+The first attempt (before the login) was not wasted either. It failed by **raising out of `ainvoke`**, not by
 returning `parsed=None` — which is exactly the case the plan says `include_raw=True`
 does not cover. `read_reply`'s `try` wraps the call for that reason, and the
 docstring now cites this probe rather than theorising.
