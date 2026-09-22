@@ -27,6 +27,10 @@ out/
 .pnpm-store/
 npm-debug.log*
 
+# impeccable (design skill) working files: decision-round payloads, question
+# server logs, surface briefs. The durable design record is frontend/DESIGN.md.
+.impeccable/
+
 # Terraform
 .terraform/
 .terraform.lock.hcl

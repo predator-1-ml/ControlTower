@@ -20,6 +20,16 @@ class Settings(BaseSettings):
         "postgresql://control_tower:control_tower@localhost:5432/control_tower"
     )
 
+    # On ECS there is no DATABASE_URL. RDS owns the master password and rotates
+    # it every 7 days, so Terraform passes where the database is and WHICH secret
+    # holds the credentials, never the credentials themselves. When
+    # `db_secret_arn` is set it wins over `database_url` — see
+    # `app/db/checkpointer.py::conninfo`.
+    db_host: str | None = None
+    db_port: int = 5432
+    db_name: str | None = None
+    db_secret_arn: str | None = None
+
     # --- LLM provider (ADR-004) -------------------------------------------
     #
     # bedrock   production, and the only one the deployed stack uses
@@ -76,12 +86,6 @@ class Settings(BaseSettings):
     embedding_model_id: str = "cohere.embed-english-v3"
 
 
-    # Optional cheaper tiers for the two highest-frequency nodes. Empty = use
-    # the main model. Planner and supervisor are structured-output calls made on
-    # every turn, so this is where token spend concentrates.
-    planner_model: str | None = None
-    supervisor_model: str | None = None
-
     # --- concurrency (ADR-004) --------------------------------------------
     # ChatBedrockConverse has NO native async: ainvoke/astream bridge blocking
     # boto3 through run_in_executor, holding a worker thread for the entire
@@ -97,11 +101,6 @@ class Settings(BaseSettings):
     # --- database pool -----------------------------------------------------
     db_pool_min_size: int = 5
     db_pool_max_size: int = 20
-
-    @property
-    def is_local(self) -> bool:
-        return self.app_env == "local"
-
 
 
 @lru_cache

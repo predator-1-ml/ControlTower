@@ -196,6 +196,35 @@ async def test_session_survives_reconnect(app_client):
     assert state["messages"][1]["text"] == state["final_response"]
 
 
+async def test_second_turn_keeps_the_first_turns_context(app_client):
+    """Regression: graph INPUT is a write, and it used to erase the session.
+
+    `/chat` seeded every channel on every turn. `customer_id` and
+    `workflow_states` have no reducer, so turn two's seed overwrote them with
+    None and {} — the claims task then had no customer to look up, and the
+    onboarding outcome was gone. The graph-level two-turn test never caught it
+    because it sends only `messages`; the bug lived in this endpoint's payload.
+    """
+    client, app = app_client
+    session = f"api-{uuid.uuid4()}"
+
+    app.state.deps.model = StubModel(PLAN_ONBOARD)
+    await _collect_sse(client, {"session_id": session, "message": "onboard CUST-1003"})
+
+    # No customer in args: the claims task must find it in shared state.
+    app.state.deps.model = StubModel(
+        Plan(goal="Check claims", tasks=[
+            PlanTask(id="1", workflow="claims", action="retrieve_claims")
+        ])
+    )
+    await _collect_sse(client, {"session_id": session, "message": "any open claims?"})
+
+    state = (await client.get(f"/sessions/{session}")).json()
+    assert [t["id"] for t in state["plan"]] == ["t1", "t2"]
+    assert state["workflow_states"]["onboarding"]["outcome"] == "manual_review"
+    assert "claims" in state["workflow_states"]
+
+
 async def test_onboarding_interrupt_reaches_the_client(app_client):
     """Regression: an interrupt raised inside a SUBGRAPH must reach the client.
 

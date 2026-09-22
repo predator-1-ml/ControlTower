@@ -110,3 +110,28 @@ variable "budget_limit_usd" {
   type        = string
   default     = "20"
 }
+
+# ------------------------------------------------------------ operator sign-in
+#
+# The static operator credential the Next.js server checks (frontend/lib/session.ts).
+# No defaults for the two secrets, deliberately: terraform.tfvars for dev is
+# COMMITTED, so they cannot live there. Supply them through the environment —
+#   export TF_VAR_operator_password=... TF_VAR_session_secret=$(openssl rand -base64 32)
+# locally, and as repository secrets in CI (.github/workflows/terraform.yml).
+
+variable "operator_username" {
+  type    = string
+  default = "operator"
+}
+
+variable "operator_password" {
+  description = "Unset, sign-in fails closed: nobody can get in."
+  type        = string
+  sensitive   = true
+}
+
+variable "session_secret" {
+  description = "HMAC key for the session cookie. Changing it signs everyone out."
+  type        = string
+  sensitive   = true
+}

@@ -58,7 +58,14 @@ async def _apply_sql_migrations(conn) -> None:
     rows = await (await conn.execute("SELECT version FROM schema_migrations")).fetchall()
     applied = {r["version"] for r in rows}
 
-    for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+    paths = sorted(MIGRATIONS_DIR.glob("*.sql"))
+    if not paths:
+        # An empty glob is a packaging bug (the image was built without
+        # migrations/), never a valid state. Exiting 0 here would report a
+        # successful migration against a database with no tables.
+        raise FileNotFoundError(f"no .sql migrations found in {MIGRATIONS_DIR}")
+
+    for path in paths:
         version = path.stem
         if version in applied:
             continue

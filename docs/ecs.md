@@ -9,8 +9,10 @@ requires.
 | `control-tower-dev-backend` | private app | internal ALB | **never** |
 
 Both run ARM64/Graviton — roughly 20% cheaper for identical work. Images are built
-natively on arm64 runners rather than under QEMU emulation, which is slow enough
-to notice.
+on GitHub's `ubuntu-24.04-arm` runners (free for public repositories) rather than
+under QEMU emulation on x64, which is slow enough to notice. The architecture must
+match: an x64 image registers without complaint and then dies on ECS with
+`exec format error`.
 
 ## The role split
 
@@ -19,13 +21,23 @@ secrets.
 
 | Role | Used by | When | Grants |
 |---|---|---|---|
-| **execution** | the ECS agent | before the container starts | pull image, resolve `secrets`, write logs |
-| **task** | the application | at runtime | invoke Bedrock, read the rotating DB secret |
+| **execution** | the ECS agent | before the container starts | pull image, write logs |
+| **task** (backend only) | the application | at runtime | invoke Bedrock, read ONE secret: the rotating DB password |
 
-Secrets injected via the task definition's `secrets` block are resolved by the
-**execution** role — which is precisely why the running container cannot read the
-secret store itself. Confusing the two is how an application ends up able to
-enumerate every secret in the account.
+The usual pattern is to inject secrets through the task definition's `secrets`
+block, resolved by the **execution** role so the container never touches the
+secret store. That pattern is deliberately NOT used here, and the reason is
+rotation: ECS resolves an injected secret once, at task start, and RDS rotates the
+master password every 7 days — so it would work for a week and then fail to
+authenticate. Instead the backend's **task** role may call `GetSecretValue` on
+that one secret ARN, and the connection pool reads it each time it opens a
+connection (`backend/app/db/checkpointer.py::conninfo`). The cost is that a
+compromised backend container can read the DB password — which it could already
+use, since it holds open connections.
+
+The **frontend has no task role at all**. It calls no AWS API; giving the only
+internet-facing container the backend's role would hand it Bedrock and the
+database password for nothing.
 
 Bedrock permissions are scoped to inference-profile and foundation-model ARNs
 rather than `"*"`. **Both are required**: Converse resolves an inference profile,
@@ -64,7 +76,7 @@ dying is cheaper than trying to prevent it.
 | Check | Gates | Endpoint |
 |---|---|---|
 | ALB target group | whether traffic is routed | `/health` |
-| Container `healthCheck` | whether ECS considers the task healthy | `/health` |
+| Container `healthCheck` | whether ECS considers the task healthy | backend `/health`, frontend `/` |
 
 `/health` **deliberately does not touch the database**. If it did, a brief RDS
 blip would make ECS kill every task at once — turning a recoverable dependency

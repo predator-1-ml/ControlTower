@@ -69,15 +69,31 @@ and one bad parse must not kill a session that already has work in flight.
 **The planner extends the plan; it never replaces it.** That single choice is the
 entire mechanism:
 
-1. Turn 1 — "onboard CUST-1002" → tasks `t1`
-2. Turn 2 — "actually, summarise CLM-5003" → planner appends `t2`; `t1` is
-   untouched
-3. Turn 3 — "back to the onboarding" → the supervisor picks up `t1` again,
-   because it was never discarded
+1. Turn 1 — "onboard CUST-1001 and check their claims" → tasks `t1`, `t2`
+2. Turn 2 — "do they have any other open claims?" → planner appends `t3`; `t1`
+   and `t2` are untouched, and the claims workflow finds the customer in
+   `customer_id`, which onboarding published a turn earlier
+3. Turn 3 — "when does a motor claim need a second review?" → `t4`, a knowledge
+   task; the onboarding and claims slices of `workflow_states` are still intact
 
-There is **no workflow-switch branch anywhere in the code**. Context survives
-because `workflow_states` is keyed per workflow, so each keeps its own scratch
-space.
+There is **no workflow-switch branch anywhere in the code**. Three channels carry
+the context between turns: `plan`, `workflow_states` (keyed per workflow, so each
+keeps its own scratch space) and `customer_id`.
+
+Two details make that true rather than merely intended:
+
+- **`/chat` seeds state only on a brand-new thread.** Graph input is a write like
+  any other, and `workflow_states` / `customer_id` have no reducer, so seeding them
+  on every turn erased exactly the context this section describes. Pinned by
+  `test_second_turn_keeps_the_first_turns_context`.
+- **A workflow's first node replaces its own slice.** Because the slice now
+  outlives the turn, a second onboarding would otherwise inherit the first one's
+  `application` and compose would report both.
+
+**What it does not do:** while a workflow is paused on `interrupt()`, the next
+message is delivered as `Command(resume=...)` — it is the answer, not a new
+request. A user cannot park a question, switch workflow, and return to it. See
+`tradeoffs.md`.
 
 One necessary detail: the model emits local ids (`"1"`, `"2"`) every turn, which
 would collide across turns. New tasks are renumbered to `t1, t2, …` on merge and
@@ -132,9 +148,9 @@ for one customer.
 
 | Situation | Behaviour |
 |---|---|
-| Task fails | `FAILED`, error recorded on the task |
-| Its dependents | `SKIPPED`, not `FAILED` — they never ran |
-| Workflow returns without claiming its task | retried up to 3 times, then failed |
+| A node raises (Bedrock throttled, database down) | the turn ends with an SSE `error` event. That step's writes are never checkpointed, so the task is still `running` in Postgres. On the next turn the supervisor finds a `running` task nobody claimed, counts an attempt and re-dispatches it — the row below |
+| Workflow returns without claiming its task | retried up to 3 times, then `FAILED` with the error recorded on the task |
+| A `FAILED` task's dependents | `SKIPPED`, not `FAILED` — they never ran |
 | Plan unparseable | error recorded, session continues |
 | No task runnable | compose what exists |
 

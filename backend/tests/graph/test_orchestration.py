@@ -212,6 +212,38 @@ async def test_second_turn_extends_the_plan_and_keeps_earlier_tasks():
     assert all(t.status is TaskStatus.DONE for t in result["plan"])
 
 
+def test_the_summary_covers_this_turn_only():
+    """The plan and every workflow slice outlive their turn; the report must not.
+
+    Observed live: after onboarding one customer, a second request produced
+    "two onboarding tasks were completed" — the composer was handed the whole
+    session. `turn_task_ids` is what scopes it.
+    """
+    from app.graph.compose import _summarise
+
+    state = new_state(session_id="s", user_id="u", trace_id="t")
+    state["plan"] = [
+        PlanTask(id="t1", workflow="onboarding", action="onboard_customer",
+                 status=TaskStatus.DONE),
+        PlanTask(id="t2", workflow="claims", action="retrieve_claims", status=TaskStatus.DONE),
+    ]
+    state["workflow_states"] = {
+        "onboarding": {"outcome": "application_created"},
+        "claims": {"outcome": "summarised"},
+    }
+    state["turn_task_ids"] = ["t2"]
+
+    summary = _summarise(state)
+    assert "[t2]" in summary and "summarised" in summary
+    assert "[t1]" not in summary and "application_created" not in summary
+
+    # A thread checkpointed before the field existed has no such key. It must
+    # still get an answer — the old, whole-session one — rather than a KeyError
+    # or "No tasks were planned."
+    del state["turn_task_ids"]
+    assert "[t1]" in _summarise(state)
+
+
 async def test_failed_identity_routes_to_manual_review():
     plan = Plan(goal="onboard", tasks=[
         PlanTask(id="1", workflow="onboarding", action="onboard_customer",

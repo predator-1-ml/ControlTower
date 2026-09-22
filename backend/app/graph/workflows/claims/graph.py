@@ -75,7 +75,13 @@ async def retrieve(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[str
         claim = await repository.get_claim(pool, claim_ref)
         claims = [claim] if claim else []
     else:
-        customer_id = task.args.get("customer_id") or state.get("customer_id")
+        # The planner is told to put `customer_ref` (CUST-1001) in args, so a
+        # standalone "does CUST-1001 have a claim?" names the customer there.
+        # Shared `customer_id` is the fallback: it is what an earlier onboarding
+        # task published, and it must not win over a customer named explicitly.
+        customer_ref = task.args.get("customer_ref")
+        customer = await repository.get_customer(pool, customer_ref) if customer_ref else None
+        customer_id = customer["id"] if customer else state.get("customer_id")
         claims = await repository.get_active_claims(pool, customer_id) if customer_id else []
 
     await repository.record_audit_event(
@@ -89,7 +95,11 @@ async def retrieve(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[str
     )
 
     return {
-        "workflow_states": _merge_claims_state(state, claims=claims),
+        # REPLACE this workflow's slice, do not merge into it. `workflow_states`
+        # outlives the turn, so a second claims task in one session would
+        # otherwise inherit the first one's `summary` and `outcome`, and compose
+        # would report both. Other workflows' slices are carried over untouched.
+        "workflow_states": {**state.get("workflow_states", {}), WORKFLOW: {"claims": claims}},
         "tool_results": [
             {
                 "task_id": task.id,
@@ -159,9 +169,12 @@ async def request_information(state: ControlTowerState) -> dict[str, Any]:
         {
             "kind": "need_info",
             "workflow": WORKFLOW,
+            # Words, not column names: an operator reads this. `fields` below
+            # keeps the raw names for anything that needs to match on them.
             "question": (
                 f"Claim {', '.join(claim_refs)} is missing "
-                f"{', '.join(missing)}. Please supply the missing details."
+                f"{' and '.join(f.replace('_', ' ') for f in missing)}. "
+                "Please supply the missing details."
             ),
             "fields": missing,
         }

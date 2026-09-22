@@ -19,7 +19,9 @@ env:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    # arm64, matching the ARM64 task definition — see deploy-backend.yml. An x64
+    # image registers fine and then fails on ECS with `exec format error`.
+    runs-on: ubuntu-24.04-arm
     environment: dev
     permissions:
       id-token: write

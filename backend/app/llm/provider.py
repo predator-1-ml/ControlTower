@@ -40,8 +40,6 @@ from langchain_core.language_models import BaseChatModel
 
 from app.core.config import Settings, get_settings
 
-_Role = str  # "planner" | "supervisor" | None -> main model
-
 log = logging.getLogger(__name__)
 
 
@@ -94,14 +92,7 @@ def configure_event_loop_executor(settings: Settings | None = None) -> None:
     )
 
 
-def _model_id_for(role: _Role | None, settings: Settings) -> str:
-    """Resolve the model id, honouring the optional cheaper tiers."""
-    override = {
-        "planner": settings.planner_model,
-        "supervisor": settings.supervisor_model,
-    }.get(role or "")
-    if override:
-        return override
+def _model_id(settings: Settings) -> str:
     return {
         "bedrock": settings.bedrock_model_id,
         "gemini": settings.gemini_model_id,
@@ -110,19 +101,18 @@ def _model_id_for(role: _Role | None, settings: Settings) -> str:
 
 
 def get_chat_model(
-    role: _Role | None = None,
     *,
     settings: Settings | None = None,
     **kwargs: Any,
 ) -> BaseChatModel:
-    """Return a chat model for `role` ("planner", "supervisor", or None).
+    """Return the chat model for the configured provider.
 
     Imports are deliberately function-local: a local dev run should not need
     `langchain_aws` importable, and an ECS task should not need an Anthropic key
     present just to import the module.
     """
     settings = settings or get_settings()
-    model_id = _model_id_for(role, settings)
+    model_id = _model_id(settings)
 
     if settings.llm_provider == "bedrock":
         from botocore.config import Config

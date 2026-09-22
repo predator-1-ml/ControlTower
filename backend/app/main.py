@@ -49,8 +49,9 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.pool = pool
     app.state.checkpointer = checkpointer
-    # None unless the provider is Bedrock. Only the knowledge workflow needs it,
-    # so the other two stay runnable without AWS credentials.
+    # Embeddings are on Bedrock for EVERY chat provider (see get_embeddings), so
+    # this is None only when AWS credentials are unavailable. Only the knowledge
+    # workflow needs it, so the other two stay runnable without AWS.
     embedder = get_embeddings(settings)
     app.state.deps = Deps(
         pool=pool,

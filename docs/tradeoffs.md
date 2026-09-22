@@ -119,6 +119,23 @@ chunk it drew only one clause from.
 **Cost:** terse or badly-phrased queries retrieve worse. This is the first thing
 to add when the corpus grows — see [`future-improvements.md`](future-improvements.md).
 
+### A paused session treats the next message as the answer
+**Gained:** the answer a user types can never be discarded. While a workflow is
+parked on `interrupt()`, `/chat` delivers the message as `Command(resume=...)`
+without consulting the planner — re-planning over a paused workflow would throw
+away what was just typed.
+**Cost:** a question cannot be parked. "Actually, do something else first" is
+consumed as the answer to the open question. The fix is a classifier in front of
+the resume (answer vs. new request), which is an LLM judgement on the one path
+that is currently deterministic — not worth it at this scale.
+
+### Free-text answers to interrupts are recorded, not parsed
+**Gained:** the human-in-the-loop path has no LLM in it and cannot misread an
+answer into the wrong field.
+**Cost:** the supplied details are stored as the operator typed them
+(`workflow_states[...]["supplied"]`), not validated. Supplying "anything"
+satisfies the pause; a real system would attach structured fields to the prompt.
+
 ### In-process session concurrency guard
 **Gained:** two concurrent turns on one session cannot race the checkpointer,
 today.

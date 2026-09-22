@@ -183,6 +183,12 @@ class ControlTowerState(TypedDict):
 
     # --- orchestration ------------------------------------------------------
     plan: Annotated[list[PlanTask], merge_tasks]
+    # Ids the planner added on the CURRENT turn. The plan accumulates for the
+    # whole session, so without this the composer reports every task ever run:
+    # observed live, turn two announced "two onboarding tasks completed" when it
+    # had run one. No reducer on purpose — each turn's planner overwrites it, and
+    # a resumed turn (which skips the planner) correctly keeps the paused turn's.
+    turn_task_ids: list[str]
     active_workflow: WorkflowName | None
     # Per-workflow scratch space. Keyed by workflow name so a user can leave
     # onboarding, handle a claim, and come back with onboarding state intact —
@@ -223,6 +229,7 @@ def new_state(session_id: str, user_id: str, trace_id: str) -> ControlTowerState
         customer_id=None,
         current_intent=None,
         plan=[],
+        turn_task_ids=[],
         active_workflow=None,
         workflow_states={},
         tool_results=[],

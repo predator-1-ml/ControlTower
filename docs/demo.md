@@ -23,7 +23,7 @@ rather than an unembedded corpus.
 
 ## Beat 1 — Planning before execution
 
-> **"Onboard CUST-1002 and check whether they already have an active claim."**
+> **"Onboard CUST-1001 and check whether they already have an active claim."**
 
 This is the assignment's own worked example, verbatim.
 
@@ -37,30 +37,48 @@ visible, not just true.
 
 Tasks then move `pending → running → done` in dependency order.
 
+CUST-1001 is verified but has an open motor claim (CLM-5001), so onboarding ends
+in **manual review** — the seeded eligibility policy, applied in code. That is an
+outcome, not a failure: the task is `done`. CUST-1001 is used here rather than
+CUST-1002 because CUST-1002 pauses for documents, and a paused session treats the
+next message as the answer (Beat 2's limit) — it is saved for Beat 3.
+
 ---
 
 ## Beat 2 — Context across a workflow switch
 
-Continue in the same session:
+Continue in the **same session**. Do not name the customer:
 
-> **"Actually, summarise claim CLM-5003 first."**
+> **"Do they have any other open claims?"**
 
-**What to point at:** the plan *extends*. The onboarding task is still there, in
-its previous state. A third task appears for claims.
+**What to point at:** the plan *extends* — `t1` and `t2` are still there, done, and
+a `t3` appears for claims. The claims workflow was never told who "they" is. It
+reads `customer_id`, which the onboarding task published to shared state a turn
+ago. That is context crossing both a turn boundary and a workflow boundary.
 
-Then:
+Then switch to a third workflow:
 
-> **"Now go back to the onboarding."**
+> **"When does a motor claim need a second review?"**
 
-The supervisor picks the original task up again.
+`t4` is a knowledge task, answered from the policy documents with citations. The
+onboarding and claims panels keep what they showed before.
 
-**Why this works:** the planner appends rather than replaces, so nothing is
-discarded, and `workflow_states` is keyed per workflow so each keeps its own
-context. There is no workflow-switch branch anywhere in the code — it falls out of
-the design.
+Then a workflow that pauses:
 
-CLM-5003 is missing `incident_report` and `police_reference`, so this beat also
-pauses and asks for them. Supply anything; the workflow completes.
+> **"Summarise claim CLM-5003."**
+
+CLM-5003 is missing `incident_report` and `police_reference`, so the claims
+workflow stops and asks for them. Supply anything; it completes.
+
+**Why this works:** three things persist in the checkpoint between turns — the
+plan (the planner appends, it never replaces), `workflow_states` (keyed per
+workflow, so each keeps its own context), and `customer_id`. There is no
+workflow-switch branch anywhere in the code.
+
+**The limit, stated up front:** while a workflow is paused on a question, the next
+message *is* the answer — it is delivered as `Command(resume=...)`, not planned.
+You cannot park a question, do something else, and come back. See
+`docs/tradeoffs.md`.
 
 ---
 

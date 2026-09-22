@@ -50,7 +50,7 @@ def _task_view(task: Any) -> dict[str, Any]:
 
 
 async def translate(
-    chunks: AsyncIterator[dict[str, Any]], *, trace_id: str
+    chunks: AsyncIterator[dict[str, Any]], *, trace_id: str, known: dict[str, str]
 ) -> AsyncIterator[dict[str, str]]:
     """Map LangGraph stream parts to SSE frames.
 
@@ -58,7 +58,11 @@ async def translate(
     straight to its `audit_events` rows. Without it, correlating a complaint to a
     run means guessing from timestamps.
     """
-    seen_status: dict[str, str] = {}
+    # Seeded with the statuses the checkpoint ALREADY holds (`known`). A subgraph
+    # hands its whole state back when it exits, so every task from earlier turns
+    # passes through here again; starting from empty, each one looked new and the
+    # client was told "t1 -> done" in the middle of a turn that never touched t1.
+    seen_status: dict[str, str] = dict(known)
     seen_interrupts: set[str] = set()
     announced_plan = False
 
@@ -72,9 +76,6 @@ async def translate(
                 text = getattr(message, "text", None) or getattr(message, "content", "")
                 if text:
                     yield sse("token", {"trace_id": trace_id, "text": text})
-
-        elif kind == "custom":
-            yield sse("progress", {"trace_id": trace_id, **(data or {})})
 
         elif kind == "updates":
             for node, update in (data or {}).items():
@@ -124,7 +125,11 @@ async def translate(
                 for error in update.get("errors") or []:
                     yield sse("error", {"trace_id": trace_id, **error})
 
-                if update.get("final_response"):
+                # From `compose` ONLY. `final_response` is ordinary state, so a
+                # workflow subgraph exiting mid-turn carries LAST turn's answer in
+                # its update — relayed as `final`, the client replaced the answer
+                # it was streaming with the previous one.
+                if node == "compose" and update.get("final_response"):
                     yield sse(
                         "final",
                         {"trace_id": trace_id, "response": update["final_response"]},

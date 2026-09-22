@@ -3,10 +3,12 @@
 Two properties matter more than the prompt:
 
 **It extends, it never replaces.** On a second turn the planner appends to the
-existing plan. That single choice is the entire mechanism for "a user may move
-between workflows during a session": new tasks join the DAG, tasks the user
-walked away from stay PENDING, and the supervisor picks them up again when they
-come back. There is no special case for switching workflows anywhere in the code.
+existing plan, so earlier tasks and their results stay in the DAG. Together with
+`workflow_states` (keyed per workflow) and `customer_id` persisting in the
+checkpoint, that is the whole mechanism for "a user may move between workflows
+during a session" — there is no special case for switching anywhere in the code.
+The limit: a session paused on `interrupt()` never reaches this node; `/chat`
+delivers the next message as the answer (see `docs/tradeoffs.md`).
 
 **Task ids are renumbered on merge.** The model emits local ids ("1", "2") every
 turn, which would collide with the previous turn's. Ids are rewritten to t1, t2…
@@ -51,9 +53,21 @@ Rules:
 
 {existing}"""
 
-EXISTING_PLAN_NOTE = """The session already has these tasks. Plan ONLY the new
-work the latest message asks for; do not repeat existing tasks:
+EXISTING_PLAN_NOTE = """The session already has these tasks. They are HANDLED — never plan
+them again, whatever the earlier requests say:
 {tasks}"""
+
+# The planner sees earlier requests so a follow-up ("and their claims?") can be
+# resolved, but they are fenced off from the one request it must plan. Handing
+# the model three bare human turns — the previous version — made it plan all
+# three: observed live, "Onboard CUST-1002" (already done) was planned a second
+# time alongside the new request, and the operator was asked for the same
+# documents twice.
+REQUEST = """Earlier requests in this session, for context only — do NOT plan these:
+{earlier}
+
+Plan ONLY this request:
+{latest}"""
 
 
 def _renumber(new_tasks: list[PlanTask], offset: int) -> list[PlanTask]:
@@ -78,8 +92,11 @@ async def plan_node(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[st
 
     existing_note = ""
     if existing:
+        # args included: without them "onboarding.onboard_customer (done)" does
+        # not say WHICH customer was onboarded, so the model cannot tell a
+        # repeat from new work.
         listed = "\n".join(
-            f"- {t.id}: {t.workflow}.{t.action} ({t.status.value})" for t in existing
+            f"- {t.id}: {t.workflow}.{t.action} {t.args} ({t.status.value})" for t in existing
         )
         existing_note = EXISTING_PLAN_NOTE.format(tasks=listed)
 
@@ -87,10 +104,16 @@ async def plan_node(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[st
     # exception: the planner runs on every turn, and one bad parse must not kill
     # a session that already has work in flight.
     planner = runtime.context.model.with_structured_output(Plan, include_raw=True)
+    requests = [str(m.content) for m in state["messages"] if isinstance(m, HumanMessage)]
     result = await planner.ainvoke(
         [
             SystemMessage(content=SYSTEM_PROMPT.format(existing=existing_note)),
-            *[m for m in state["messages"] if isinstance(m, HumanMessage)][-3:],
+            HumanMessage(
+                content=REQUEST.format(
+                    earlier="\n".join(f"- {r}" for r in requests[-3:-1]) or "(none)",
+                    latest=requests[-1],
+                )
+            ),
         ]
     )
 
@@ -111,5 +134,6 @@ async def plan_node(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[st
     tasks = _renumber(parsed.tasks, offset=len(existing))
     return {
         "plan": tasks,  # merge_tasks appends; existing tasks are untouched
+        "turn_task_ids": [t.id for t in tasks],
         "current_intent": parsed.goal,
     }

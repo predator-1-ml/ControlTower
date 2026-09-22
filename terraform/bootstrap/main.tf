@@ -26,9 +26,9 @@ provider "aws" {
 }
 
 variable "region" {
-  description = "Region for the state bucket. Keep it with the workloads."
+  description = "Region for the state bucket. Must match `region` in environments/dev/backend.tf, or `terraform init` there cannot find the bucket."
   type        = string
-  default     = "us-east-1"
+  default     = "ap-southeast-1"
 }
 
 variable "state_bucket_name" {

@@ -81,7 +81,14 @@ async def load_customer(state: ControlTowerState, runtime: Runtime[Deps]) -> dic
     )
 
     return {
-        "workflow_states": _merge(state, customer=customer, customer_ref=ref),
+        # REPLACE this workflow's slice, do not merge into it. `workflow_states`
+        # outlives the turn, so onboarding a second customer in one session would
+        # otherwise inherit the first one's `application` or `review_reason`, and
+        # compose would report both. Other workflows' slices are left untouched.
+        "workflow_states": {
+            **state.get("workflow_states", {}),
+            WORKFLOW: {"customer": customer, "customer_ref": ref},
+        },
         # Publish to shared state so a later claims task can depend on it without
         # re-reading the database. This is how "onboard X and check their claims"
         # passes context between two different workflows.
@@ -124,8 +131,12 @@ async def request_information(state: ControlTowerState) -> dict[str, Any]:
             "fields": missing,
         }
     )
-    customer = {**(_ws(state).get("customer") or {}), **(supplied or {})}
-    return {"workflow_states": _merge(state, customer=customer, missing_fields=[])}
+    # `/chat` resumes with the operator's free text, never a dict, so it is
+    # recorded as given rather than unpacked into the customer record (`**text`
+    # raises TypeError and, because the thread stays parked on this interrupt,
+    # every later message would resume into the same crash). Turning "born
+    # 1990-01-01" into fields is language work this workflow deliberately has none of.
+    return {"workflow_states": _merge(state, supplied=supplied, missing_fields=[])}
 
 
 async def verify_identity(state: ControlTowerState) -> dict[str, Any]:

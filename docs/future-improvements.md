@@ -88,8 +88,9 @@ The UI shows the plan and an activity log. It does not show the graph.
 
 **Fix:** render the DAG with dependency edges drawn, node-level progress inside a
 running workflow, and the ability to inspect a completed task's tool results.
-`get_stream_writer()` already emits per-node progress; the frontend just
-aggregates it into a list today.
+Node-level progress would come from LangGraph's `custom` stream mode
+(`get_stream_writer()` inside a node); today only task-level status changes are
+streamed, derived from the `updates` channel.
 
 ## 10. Blue/green deployments
 

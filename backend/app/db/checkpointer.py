@@ -11,6 +11,11 @@ file.
 
 from __future__ import annotations
 
+import asyncio
+import json
+from collections.abc import Awaitable, Callable
+
+from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
@@ -35,6 +40,48 @@ CONNECTION_KWARGS: dict[str, object] = {
 }
 
 
+def conninfo(settings: Settings) -> str | Callable[[], Awaitable[str]]:
+    """Where to connect: a fixed URL locally, a per-connection lookup on ECS.
+
+    On ECS the password lives in a Secrets Manager secret that RDS rotates every
+    7 days. The pool accepts a *callable* conninfo and calls it each time it opens
+    a connection, so a connection opened after a rotation simply reads the new
+    password. Nothing restarts and nothing caches.
+
+    Rejected: injecting the secret through the task definition's `secrets` block.
+    ECS resolves that once, at task start — it works for a week, then every new
+    connection fails authentication until the task is replaced.
+    """
+    if not settings.db_secret_arn:
+        return settings.database_url
+
+    def _fetch() -> str:
+        import boto3  # only needed on ECS; keeps AWS out of local and CI imports
+
+        secret = json.loads(
+            boto3.client("secretsmanager", region_name=settings.aws_region)
+            .get_secret_value(SecretId=settings.db_secret_arn)["SecretString"]
+        )
+        return make_conninfo(
+            host=settings.db_host,
+            port=settings.db_port,
+            dbname=settings.db_name,
+            user=secret["username"],
+            password=secret["password"],
+            # RDS PostgreSQL 15+ rejects unencrypted connections by default
+            # (rds.force_ssl=1); psycopg's default `prefer` would also work, but
+            # `require` fails loudly instead of silently downgrading.
+            sslmode="require",
+        )
+
+    async def _fetch_async() -> str:
+        # boto3 is blocking. The pool opens connections on the event loop, so a
+        # direct call would stall every in-flight SSE stream for the round trip.
+        return await asyncio.to_thread(_fetch)
+
+    return _fetch_async
+
+
 def build_pool(settings: Settings | None = None) -> AsyncConnectionPool:
     """Construct the pool *closed*.
 
@@ -44,7 +91,7 @@ def build_pool(settings: Settings | None = None) -> AsyncConnectionPool:
     """
     settings = settings or get_settings()
     return AsyncConnectionPool(
-        conninfo=settings.database_url,
+        conninfo=conninfo(settings),
         min_size=settings.db_pool_min_size,
         max_size=settings.db_pool_max_size,
         max_idle=300,

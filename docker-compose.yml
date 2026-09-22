@@ -54,9 +54,17 @@ services:
       # database host is the service name, not localhost.
       DATABASE_URL: postgresql://control_tower:control_tower@postgres:5432/control_tower
       APP_ENV: local
-      # Read from the shell so `AWS_PROFILE=x docker compose up` works; harmless
-      # when empty because the AWS SDK falls back to the default profile.
-      AWS_PROFILE: ${AWS_PROFILE:-}
+      # AWS_PROFILE is deliberately NOT listed here; set it in backend/.env.
+      # Both ways of "passing it through from the shell" shadow that file:
+      #   AWS_PROFILE: ${AWS_PROFILE:-}   unset in the shell -> "" in the container,
+      #                                   and boto looks for a profile named "":
+      #                                   "The config profile () could not be found"
+      #   AWS_PROFILE:                    (no value) still overrides env_file, with
+      #                                   a bare, valueless variable — verified with
+      #                                   `docker inspect`.
+      # This is the empty-string trap described above, walked into anyway. It hid
+      # for days because the containers were created once, from a shell that
+      # happened to have the variable set, and then left running.
     ports:
       - "8000:8000"
     depends_on:
@@ -95,6 +103,12 @@ services:
     environment:
       # Server-side only — the BFF route handler reads this at request time.
       BACKEND_INTERNAL_URL: http://backend:8000
+      # Static operator sign-in (frontend/lib/session.ts). The defaults are for
+      # THIS machine only, in the same spirit as the postgres password above.
+      # The app itself has no default: unset, nobody can sign in.
+      OPERATOR_USERNAME: ${OPERATOR_USERNAME:-operator}
+      OPERATOR_PASSWORD: ${OPERATOR_PASSWORD:-tower-local-only}
+      SESSION_SECRET: ${SESSION_SECRET:-local-dev-secret-not-for-deployment}
     ports:
       - "3000:3000"
     depends_on:

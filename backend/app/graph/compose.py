@@ -39,13 +39,22 @@ def _summarise(state: ControlTowerState) -> str:
     lines: list[str] = []
     workflow_states = state.get("workflow_states", {})
 
-    for task in state.get("plan", []):
+    # Report THIS turn's tasks, not the session's. `.get`, and the fall-back to
+    # the whole plan, are for threads checkpointed before `turn_task_ids` existed
+    # — new state fields must be optional (see state.py, schema_version).
+    turn_ids = state.get("turn_task_ids")
+    tasks = [t for t in state.get("plan", []) if turn_ids is None or t.id in turn_ids]
+
+    for task in tasks:
         line = f"[{task.id}] {task.workflow}.{task.action} -> {task.status.value}"
         if task.error:
             line += f" (error: {task.error})"
         lines.append(line)
 
-    for workflow, ws in workflow_states.items():
+    # Only the workflows this turn touched: every slice outlives its turn, so an
+    # untouched one still holds an older request's outcome.
+    for workflow in dict.fromkeys(t.workflow for t in tasks):
+        ws = workflow_states.get(workflow, {})
         detail = {k: v for k, v in ws.items() if k not in ("customer", "claims")}
         if detail:
             lines.append(f"{workflow} result: {detail}")

@@ -74,12 +74,6 @@ variable "environment" {
   default     = {}
 }
 
-variable "secrets" {
-  description = "name -> Secrets Manager ARN. Non-rotating secrets only; see main.tf."
-  type        = map(string)
-  default     = {}
-}
-
 variable "health_check_command" {
   description = "Container healthcheck. Fargate slim images have no curl."
   type        = list(string)

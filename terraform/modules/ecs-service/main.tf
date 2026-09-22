@@ -32,16 +32,11 @@ resource "aws_ecs_task_definition" "this" {
         for k, v in var.environment : { name = k, value = v }
       ]
 
-      # Resolved by the EXECUTION role before the container starts, so the
-      # container never holds permission to read the secret store.
-      #
-      # Only for secrets that do not rotate. The RDS password deliberately is not
-      # here: AWS does not update an injected secret when it rotates, so it would
-      # work for seven days and then fail to authenticate. The app fetches that
-      # one at connect time instead.
-      secrets = [
-        for k, v in var.secrets : { name = k, valueFrom = v }
-      ]
+      # No `secrets` block, deliberately. The only secret in this system is the
+      # RDS password, and ECS resolves an injected secret ONCE, at task start: it
+      # would work until the 7-day rotation and then fail to authenticate. The
+      # app reads it from Secrets Manager per connection instead, using the TASK
+      # role — see backend/app/db/checkpointer.py.
 
       logConfiguration = {
         logDriver = "awslogs"
