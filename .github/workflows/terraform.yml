@@ -47,6 +47,12 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          # The action installs a WRAPPER around the binary by default. It always
+          # exits 0 and reports the real code only as its own step output, so the
+          # `$?` read below was 0 for a plan with changes: upload and apply were
+          # skipped while the job showed green. Without the wrapper `$?` is
+          # terraform's own -detailed-exitcode.
+          terraform_wrapper: false
 
       # Read-only role. Plan runs on every pull request with no approval gate, so
       # it must not be able to change anything.
@@ -116,6 +122,12 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          # The action installs a WRAPPER around the binary by default. It always
+          # exits 0 and reports the real code only as its own step output, so the
+          # `$?` read below was 0 for a plan with changes: upload and apply were
+          # skipped while the job showed green. Without the wrapper `$?` is
+          # terraform's own -detailed-exitcode.
+          terraform_wrapper: false
 
       - uses: aws-actions/configure-aws-credentials@v5
         with:
