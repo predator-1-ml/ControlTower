@@ -31,7 +31,7 @@ an unsettled claim requires manual review. They are quoted from the seeded polic
 documents, so the RAG workflow and the deterministic workflow cannot give a
 handler two different answers — and that agreement is *checked*, not asserted:
 `test_claims_workflow.py::test_the_thresholds_in_code_are_the_thresholds_in_the_policy_text`
-reads `data/seed/seed.sql` and fails if either number is tuned in only one place.
+reads `backend/seed/seed.sql` and fails if either number is tuned in only one place.
 
 The second-review rule is restricted to **motor** claims because the policy
 sentence sits under the *Motor claims* heading, directly after "Motor claims under

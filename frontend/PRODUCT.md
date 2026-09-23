@@ -96,7 +96,7 @@ Postgres, not in the process or the browser.
 ## Evidence on Hand
 
 - Real seeded data: customers CUST-1001…1004, claims CLM-5001…5003, five policy
-  excerpts (`data/seed/seed.sql`). Demo script: `docs/demo.md`.
+  excerpts (`backend/seed/seed.sql`). Demo script: `docs/demo.md`.
 - Verified screenshots of every functional state:
   scratchpad `ui/01`–`09` (pre-redesign look).
 - There are no customers, testimonials, metrics, pricing or uptime figures. None may
