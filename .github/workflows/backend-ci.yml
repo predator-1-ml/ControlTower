@@ -67,10 +67,6 @@ jobs:
       - name: Seed
         working-directory: backend
         run: uv run python -m app.scripts.seed
-|
-          docker exec -i $(docker ps -q --filter ancestor=pgvector/pgvector:pg17) \
-            psql -U control_tower -d control_tower -v ON_ERROR_STOP=1 \
-            < data/seed/seed.sql
 
       - name: Test
         working-directory: backend
