@@ -33,7 +33,7 @@ cd ../environments/dev && terraform init && terraform apply
 
 ```hcl
 backend "s3" {
-  bucket       = "control-tower-tfstate"
+  bucket       = "control-tower-tfstate-187880375508"
   key          = "dev/terraform.tfstate"
   region       = "ap-southeast-1"
   encrypt      = true

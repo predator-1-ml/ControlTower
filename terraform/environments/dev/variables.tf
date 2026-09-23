@@ -96,7 +96,7 @@ variable "github_repository_id" {
 variable "state_bucket" {
   description = "Must match the bucket in backend.tf"
   type        = string
-  default     = "control-tower-tfstate"
+  default     = "control-tower-tfstate-187880375508"
 }
 
 variable "budget_email" {
