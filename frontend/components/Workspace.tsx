@@ -564,7 +564,13 @@ export function Workspace({ operator }: { operator: string }) {
   return (
     // Desktop is a fixed-height app whose panes scroll themselves. On a phone the
     // page scrolls instead: three nested scroll areas in 400px is unusable.
-    <div className="flex min-h-dvh flex-col lg:grid lg:h-dvh lg:grid-cols-[15rem_minmax(0,1fr)]">
+    // lg:h-screen (100vh), not h-dvh, on desktop. The two are identical on a
+    // desktop viewport: dvh only differs where mobile browser chrome collapses,
+    // and lg is not mobile. An older Chrome on macOS kept a stale dvh after the
+    // window was enlarged, so the workspace ended a third of the way down a
+    // tall window until reload. vh has never had that behaviour. Below lg the
+    // page still uses min-h-dvh, where the difference is real.
+    <div className="flex min-h-dvh flex-col lg:grid lg:h-screen lg:grid-cols-[15rem_minmax(0,1fr)]">
       {/* The sidebar holds only things that are real: what this browser has
           observed of the backend, the way to start over, who is signed in. No
           links — there is one screen, and a nav item that leads nowhere is a lie
