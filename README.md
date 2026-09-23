@@ -201,6 +201,7 @@ See [`docs/demo.md`](docs/demo.md) for the three-beat walkthrough.
 | [`tradeoffs.md`](docs/tradeoffs.md) | Every decision with its cost stated |
 | [`future-improvements.md`](docs/future-improvements.md) | Ordered by what I would do first |
 | [`demo.md`](docs/demo.md) | Three-beat walkthrough |
+| [`deployment-walkthrough.md`](docs/deployment-walkthrough.md) | What actually happened on the first deploy, and the five things only live traffic found |
 | [`plans/`](docs/plans/) | Original design plans and ADRs |
 
 If you read one, read [`networking.md`](docs/networking.md) — it covers the
