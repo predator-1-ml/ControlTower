@@ -95,7 +95,11 @@ module "alb_public" {
   subnet_ids        = module.networking.public_subnet_ids
   security_group_id = module.networking.alb_public_sg_id
   target_port       = var.frontend_port
-  health_check_path = "/"
+  # "/" now answers 307 to /sign-in for a signed-out caller, and the target
+  # group only accepts 200 — so ECS declared every real frontend task unhealthy
+  # and cycled them until the circuit breaker would have rolled back to the
+  # placeholder. /sign-in is the one page that returns 200 with no session.
+  health_check_path = "/sign-in"
   tags              = local.tags
 }
 
@@ -108,6 +112,7 @@ module "alb_internal" {
   subnet_ids        = module.networking.private_app_subnet_ids
   security_group_id = module.networking.alb_internal_sg_id
   target_port       = var.backend_port
+  listener_port     = var.backend_port # see modules/alb/main.tf, the listener
   health_check_path = "/health"
   tags              = local.tags
 }

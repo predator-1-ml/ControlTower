@@ -53,3 +53,9 @@ variable "tags" {
   type    = map(string)
   default = {}
 }
+
+variable "listener_port" {
+  description = "Port the ALB accepts traffic on. 80 for the public ALB; the internal one listens on the backend port so the frontend's private URL reads exactly like local dev."
+  type        = number
+  default     = 80
+}

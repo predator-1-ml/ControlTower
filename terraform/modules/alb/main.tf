@@ -61,8 +61,13 @@ resource "aws_lb_target_group" "this" {
 
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.this.arn
-  port              = 80
-  protocol          = "HTTP"
+  # Not hardcoded to 80: the internal ALB answers on the backend port, because
+  # the frontend is handed http://api.<zone>:<backend_port> and the security
+  # group between them only opens that port. With a fixed 80 here the name
+  # resolved and the target was healthy, yet every BFF call failed with
+  # "fetch failed" — a connection refused, one hop short of the backend.
+  port     = var.listener_port
+  protocol = "HTTP"
 
   default_action {
     type             = "forward"
