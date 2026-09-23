@@ -1,1 +1,170 @@
 @import "tailwindcss";
+
+/*
+ * Design tokens. Tailwind 4 is CSS-first: each `--color-x` here becomes the
+ * utilities `bg-x`, `text-x`, `border-x`, so there is no tailwind.config to keep
+ * in step with this file. The reasoning for the whole system is in DESIGN.md.
+ *
+ * THE LOOK: a clean light CRM workspace, familiar on purpose. An operations
+ * handler has used a CRM before; nothing here has to be learned first. Three
+ * rules carry everything:
+ *
+ *   1. SURFACES ARE TWO GREYS APART. White is where work happens (conversation,
+ *      task rows, inputs); `canvas` is the frame around it (sidebar, plan
+ *      column). Hairline borders separate; one soft shadow lifts a card.
+ *   2. THE ACCENT IS ONLY EVER SOMETHING THE OPERATOR CAN DO OR DID: the primary
+ *      button, the focus ring, their own messages, the suggested requests,
+ *      the caret and selection.
+ *      It is never decoration, so the accent on screen always means "yours".
+ *   3. STATE HUES MEAN ONE THING EVERYWHERE: amber needs you, green done, red
+ *      failed. Every use is a glyph + a word on a wash, never colour alone.
+ *
+ * Light only, chosen from the scene: a lit office, a desk monitor, and a
+ * compressed screen recording that crushes thin light-on-dark text. Rejected:
+ * the near-black "ops console" (the stock look for AI tooling, ruled out by the
+ * owner) and the glassy pastel CRM from the same Dribbble search (blur smears in
+ * a recording and its contrast does not reach AA).
+ *
+ * Every text pair clears WCAG AA 4.5:1 on the surface it is used on; ratios are
+ * computed (WCAG relative luminance), not estimated. `line` and the workflow
+ * dots are identification aids and never the only carrier.
+ */
+
+/*
+ * Fonts get their own `inline` block because the value points at a variable
+ * that next/font defines through a class (app/layout.tsx). A normal theme
+ * variable is resolved at :root, so it only works while that class happens to
+ * sit on <html>; `inline` writes the var() into each utility, so it resolves
+ * where it is used.
+ */
+@theme inline {
+  --font-sans: var(--font-public-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+@theme {
+  /* Neutrals are one cool grey family, so the frame never fights the accent. */
+  --color-canvas: #f6f7f9; /* the frame: sidebar, plan column, sign-in ground */
+  --color-surface: #ffffff; /* where work happens */
+  --color-sunken: #eef0f4; /* hover, neutral chips */
+  --color-line: #e3e6eb; /* hairline borders and dividers (decorative) */
+  --color-line-strong: #848d9a; /* control borders: 3.4:1 on surface, the 3:1
+                                   WCAG 1.4.11 asks of a control's boundary */
+  --color-ink: #131720; /* 17.9:1 */
+  --color-ink-2: #454d5b; /* 8.5:1 on surface, 8.0:1 on canvas, 7.5:1 on sunken */
+  --color-ink-3: #5f6877; /* times, placeholders: 5.6:1 on surface, 5.3:1 on canvas */
+
+  /* The accent: the operator's colour and nothing else (rule 2). */
+  --color-accent: #2451c6; /* 6.9:1 on surface, and under white button text */
+  --color-accent-deep: #1b3e9c; /* hover / pressed; 8.2:1 as text on the wash */
+  --color-accent-wash: #e8eefc;
+
+  --color-hold: #9a4a06; /* needs a person — the only warm colour. 6.3:1 on
+                            surface, 5.6:1 on its wash, 5.8:1 on canvas */
+  --color-hold-deep: #7a3a05; /* hover on the amber Send answer; 8.6:1 under white */
+  --color-hold-wash: #fdf1e1;
+  --color-clear: #1a6a3a; /* done, 6.6:1; 5.8:1 on its wash */
+  --color-clear-wash: #e5f4ea;
+  --color-fail: #b3261e; /* 6.5:1; 5.7:1 on its wash */
+  --color-fail-wash: #fdeceb;
+
+  /* Workflow identity: a dot beside the printed workflow name. Mid-tone and dull
+     so they cannot be mistaken for the dark, saturated state hues. */
+  --color-wf-onboarding: #5b82c9;
+  --color-wf-claims: #c4983d;
+  --color-wf-knowledge: #9078b8;
+
+  /* The one elevation. Offset and blurred, tinted with the ink hue — a
+     zero-offset halo would be a glow, not a shadow. */
+  --shadow-card: 0 1px 2px rgb(19 23 32 / 0.06), 0 1px 3px rgb(19 23 32 / 0.08);
+
+  --ease-settle: cubic-bezier(0.16, 1, 0.3, 1); /* exponential ease-out, no bounce */
+}
+
+/* ----------------------------------------------------------------- motion */
+
+/*
+ * THE one authored motion: a task row changing state. It is the View Transitions
+ * API (components/Workspace.tsx `move`): each row names itself `task-<id>`, so
+ * the browser crossfades that row's old and new picture and slides its
+ * neighbours when the needs-you row grows — no animation library and no position
+ * maths.
+ *
+ * Firefox and older Safari have no startViewTransition: rows simply change.
+ * Nothing depends on the movement — the chip's word is still the state.
+ */
+::view-transition-group(*) {
+  animation-duration: 200ms;
+  animation-timing-function: var(--ease-settle);
+}
+/* The page itself must not cross-fade on every task event: only rows do. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* The caret on the assistant turn that is still streaming (ChatPanel). */
+.printing::after {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background-color: var(--color-ink);
+  animation: blink 1s steps(1) infinite;
+}
+
+/*
+ * Motion here is confirmation, never information — every moving thing also has
+ * a printed label — so all of it can simply stop. One block, not a
+ * `motion-reduce:` variant per call site, so a new animation cannot forget it.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .animate-spin,
+  .printing::after {
+    animation: none;
+  }
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+}
+
+/* ------------------------------------------------ the parts nobody draws */
+
+/*
+ * Selection, caret, focus and scrollbars ship with browser defaults that belong
+ * to no design system. They are the operator's marks on the page, so they take
+ * the accent (rule 2).
+ */
+::selection {
+  background-color: var(--color-accent-wash);
+  color: var(--color-accent-deep);
+}
+
+:root {
+  caret-color: var(--color-accent);
+  scrollbar-color: var(--color-line-strong) transparent;
+  scrollbar-width: thin;
+}
+
+/*
+ * One focus treatment for every control. :focus-visible, not :focus, so a mouse
+ * click on a button draws no ring.
+ */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Ids, counts and clock times line up in columns only with fixed-width digits. */
+.figures {
+  font-variant-numeric: tabular-nums;
+}

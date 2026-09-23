@@ -12,13 +12,31 @@ one domain.
 
 **Internal operators, not customers.** The assignment says "intended for internal
 operational users". So: no customer-facing authentication, no multi-tenancy, and
-an operator is trusted to look up any customer. A customer-facing version would
+an operator is trusted to look up any customer.
+
+**One static operator credential, not identity management.** The tool is internal
+but its load balancer is public, so there is a door: a sign-in checked on the
+Next.js server against a credential from the environment, remembered in an
+HMAC-signed httpOnly cookie, with a guard in front of both the pages and `/bff/*`
+(`frontend/lib/session.ts`, `frontend/proxy.ts`). There is deliberately no user
+store, no sign-up, no lockout and no server-side revocation — a copied cookie is
+valid until its 8-hour expiry. Production would put OIDC at the ALB listener
+(`authenticate-oidc`) and make the ALB internal behind a VPN; the app-level check
+would then be defence in depth rather than the only door. A customer-facing version would
 need per-user authorisation on every tool call, which is a different design.
 
-**Business rules are simplified but not invented.** Age ≥ 18, claims ≥ 5000 need a
-second review, an unsettled claim requires manual review. They come from the
-seeded policy documents so the RAG workflow and the deterministic workflow agree
-with each other.
+**Business rules are simplified but not invented.** Age ≥ 18; a motor claim of
+5000 or more needs a second review; a claim over 10000 goes to the duty manager;
+an unsettled claim requires manual review. They are quoted from the seeded policy
+documents, so the RAG workflow and the deterministic workflow cannot give a
+handler two different answers — and that agreement is *checked*, not asserted:
+`test_claims_workflow.py::test_the_thresholds_in_code_are_the_thresholds_in_the_policy_text`
+reads `data/seed/seed.sql` and fails if either number is tuned in only one place.
+
+The second-review rule is restricted to **motor** claims because the policy
+sentence sits under the *Motor claims* heading, directly after "Motor claims under
+5000 are settled by a single assessor". Reading it as a rule for all claim types
+would over-escalate every large travel and property claim.
 
 ## Scale
 

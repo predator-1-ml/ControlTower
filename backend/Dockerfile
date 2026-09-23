@@ -37,6 +37,10 @@ COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
 COPY --chown=appuser:appuser app ./app
+# The migration task runs THIS image (`python -m app.scripts.migrate`), so the
+# .sql files must be in it. Without them the glob is empty and the task exits 0
+# having created nothing — a green deploy onto a database with no tables.
+COPY --chown=appuser:appuser migrations ./migrations
 
 USER appuser
 EXPOSE 8000

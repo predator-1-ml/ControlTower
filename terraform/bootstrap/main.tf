@@ -26,15 +26,19 @@ provider "aws" {
 }
 
 variable "region" {
-  description = "Region for the state bucket. Keep it with the workloads."
+  description = "Region for the state bucket. Must match `region` in environments/dev/backend.tf, or `terraform init` there cannot find the bucket."
   type        = string
-  default     = "us-east-1"
+  default     = "ap-southeast-1"
 }
 
 variable "state_bucket_name" {
-  description = "Globally unique. S3 bucket names are a global namespace."
+  # The bare name "control-tower-tfstate" is already owned by some other AWS
+  # account: CreateBucket fails with 409 BucketAlreadyExists even though this
+  # account has no buckets at all. An account-id suffix is the standard way to
+  # make the name unique without inventing one; account ids are not secret.
+  description = "Globally unique. S3 bucket names are one namespace shared by every AWS account."
   type        = string
-  default     = "control-tower-tfstate"
+  default     = "control-tower-tfstate-187880375508"
 }
 
 resource "aws_s3_bucket" "state" {

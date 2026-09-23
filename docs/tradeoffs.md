@@ -119,6 +119,48 @@ chunk it drew only one clause from.
 **Cost:** terse or badly-phrased queries retrieve worse. This is the first thing
 to add when the corpus grows — see [`future-improvements.md`](future-improvements.md).
 
+### A paused session treats the next message as the answer
+**Gained:** the answer a user types can never be discarded. While a workflow is
+parked on `interrupt()`, `/chat` delivers the message as `Command(resume=...)`
+without consulting the planner — re-planning over a paused workflow would throw
+away what was just typed.
+**Cost:** a question cannot be parked. "Actually, do something else first" is
+consumed as the answer to the open question. The fix would be a classifier in
+front of the resume (answer vs. new request), which is an LLM judgement on the one
+path that is currently deterministic — not worth it at this scale.
+
+What the operator gets instead is a way **out**: "I don't have this yet" on the
+question card sends an **empty answer**, and every pausing node reads an empty
+answer as nothing supplied — claims ends the pause without calling the model, and
+an onboarding documents request no longer verifies identity on it (it goes to
+manual review with the reason recorded). Empty is unambiguous on the wire because
+the composer will not send an empty message any other way; on a fresh turn `/chat`
+rejects it. Rejected: a `skip` flag on the request — a second way to say the same
+thing.
+
+In claims this is now at least *visible*: a new request typed at the pause
+extracts nothing, so the pause ends and the answer says the reply contained none
+of the requested details and the claim is still waiting. The operator is told,
+rather than silently ignored. Replies are still never stored as a `HumanMessage`
+— storing them would break the "the last human message is the request" rule that
+both the planner and `compose` depend on, so a restored transcript does not show
+them. A documented gap, not a fixed one.
+
+### The claims pause reads the reply; the onboarding pause does not
+**Gained:** in claims, a model extracts what the operator supplied and **code
+verifies it** — a pair is kept only if its name was asked for and its value occurs
+in the reply. So an invented reference is discarded, the claim row actually
+changes, and a partially answered pause asks again for just the rest.
+**Cost:** the verification stops invention, not nonsense. "yes" is accepted as a
+police reference if the operator typed "yes"; validating a reference *format*
+needs a schema per field that does not exist here. And the extraction is a model
+call on the human-in-the-loop path, so it can fail — caught in the node, surfaced
+as "the reply could not be read", never as a stuck task.
+
+Onboarding's pauses deliberately keep the old behaviour: they record what was
+typed and move on. Every decision that workflow makes has legal weight, so it has
+no LLM anywhere, and adding one to read a date of birth would be the first.
+
 ### In-process session concurrency guard
 **Gained:** two concurrent turns on one session cannot race the checkpointer,
 today.

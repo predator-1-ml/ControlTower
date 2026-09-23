@@ -23,12 +23,16 @@ rather than an unembedded corpus.
 
 ## Beat 1 — Planning before execution
 
-> **"Onboard CUST-1002 and check whether they already have an active claim."**
+> **"Onboard CUST-1001 and check whether they already have an active claim."**
 
 This is the assignment's own worked example, verbatim.
 
 **What to point at:** the plan appears in the right-hand panel **before any task
-starts running**, with `t2` showing `waits for t1`. The claims lookup depends on
+starts running**, with `t2` showing `waits for t1`. Above it, the **Session** card
+already lists the three workflows; two of them fill in as the turn ends
+(Onboarding: manual review, Claims: CLM-5001 open) and Knowledge stays "Not used
+yet". The answer's step trail opens with `● Onboarding ● Claims` — the handoff is
+in the transcript, not only the panel. The claims lookup depends on
 the onboarding task because it needs the customer identified first.
 
 That ordering is not cosmetic — the backend emits the `plan` SSE event the moment
@@ -37,30 +41,73 @@ visible, not just true.
 
 Tasks then move `pending → running → done` in dependency order.
 
+CUST-1001 is verified but has an open motor claim (CLM-5001), so onboarding ends
+in **manual review** — the seeded eligibility policy, applied in code. That is an
+outcome, not a failure: the task is `done`. CUST-1001 is used here rather than
+CUST-1002 because CUST-1002 pauses for documents, and a paused session treats the
+next message as the answer (Beat 2's limit) — it is saved for Beat 3.
+
 ---
 
 ## Beat 2 — Context across a workflow switch
 
-Continue in the same session:
+Continue in the **same session**. Do not name the customer:
 
-> **"Actually, summarise claim CLM-5003 first."**
+> **"Do they have any other open claims?"**
 
-**What to point at:** the plan *extends*. The onboarding task is still there, in
-its previous state. A third task appears for claims.
+**What to point at:** the plan *extends* — `t1` and `t2` are still there, done, and
+a `t3` appears for claims. The claims workflow was never told who "they" is. It
+reads `customer_id`, which the onboarding task published to shared state a turn
+ago. That is context crossing both a turn boundary and a workflow boundary — and
+the Session card's first line, `Customer CUST-1001 Priya Raman`, is where the
+audience sees the context the workflow used. This turn's trail carries only a
+`● Claims` chip: one workflow, picked by the planner.
 
-Then:
+Then switch to a third workflow:
 
-> **"Now go back to the onboarding."**
+> **"When does a motor claim need a second review?"**
 
-The supervisor picks the original task up again.
+`t4` is a knowledge task, answered from the policy documents with citations. The
+onboarding and claims panels keep what they showed before.
 
-**Why this works:** the planner appends rather than replaces, so nothing is
-discarded, and `workflow_states` is keyed per workflow so each keeps its own
-context. There is no workflow-switch branch anywhere in the code — it falls out of
-the design.
+Then a workflow that pauses:
 
-CLM-5003 is missing `incident_report` and `police_reference`, so this beat also
-pauses and asks for them. Supply anything; the workflow completes.
+> **"Summarise claim CLM-5003."**
+
+CLM-5003 is missing `incident_report` and `police_reference`, so the claims
+workflow stops and asks for them. Answer in plain words:
+
+> **"Incident report IR-2291, police ref PR-77431"**
+
+**What to point at:** the reply is *read*, not echoed. The model extracts the two
+references, code checks each value actually occurs in what was typed (so an
+invented reference is discarded), one node writes them, and the claim row moves to
+`under_review` with an `audit_events` row holding the values. The answer ends with
+a next step the code chose from the seeded policy — escalation to the duty
+manager, because 12,750 exceeds 10,000 — with the citation beside it.
+
+Supply only one of the two ("the police reference is PR-77431") and it asks again
+for just the other. Supply neither and the pause ends honestly: the claim is
+reported as still waiting, not quietly completed.
+
+> **Repeating this beat:** it mutates the seed. Put CLM-5003 back with
+> ```sql
+> UPDATE claims SET status = 'awaiting_information',
+>   missing_fields = '["incident_report", "police_reference"]'::jsonb
+>  WHERE claim_ref = 'CLM-5003';
+> ```
+> `make seed` also works, but it truncates `knowledge_chunks` too, so it forces a
+> re-ingest before Beat 1's knowledge question works again.
+
+**Why this works:** three things persist in the checkpoint between turns — the
+plan (the planner appends, it never replaces), `workflow_states` (keyed per
+workflow, so each keeps its own context), and `customer_id`. There is no
+workflow-switch branch anywhere in the code.
+
+**The limit, stated up front:** while a workflow is paused on a question, the next
+message *is* the answer — it is delivered as `Command(resume=...)`, not planned.
+You cannot park a question, do something else, and come back. See
+`docs/tradeoffs.md`.
 
 ---
 

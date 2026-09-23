@@ -6,7 +6,7 @@ Five workflows. Two verify, three deploy.
 |---|---|---|
 | `backend-ci` | backend changes | ruff, migrate, seed, pytest against real Postgres+pgvector |
 | `frontend-ci` | frontend changes | typecheck, production build |
-| `deploy-backend` | push to main | build → ECR → **migrate** → ECS rolling update |
+| `deploy-backend` | push to main | build → ECR → register revision → **migrate on that revision** → ECS rolling update → confirm no rollback |
 | `deploy-frontend` | push to main | build → ECR → ECS rolling update |
 | `terraform` | terraform changes | plan on PR, apply on main behind approval |
 
@@ -48,13 +48,24 @@ gate, not a narrower policy** — see below.
 
 ### The environment gate is the actual security control
 
-Every deploying job declares `environment: dev`, and the trust policy requires
-`…:sub` to equal `repo:OWNER/REPO:environment:dev`.
+There are **two trust policies**, not one. The deploy and apply roles share the
+*gated* policy: every deploying job declares `environment: dev`, and the policy
+requires `…:sub` to equal `repo:OWNER/REPO:environment:dev`. The read-only plan
+role has its own, trusting `…:pull_request` and `…:ref:refs/heads/main`, because
+the plan job declares no environment — a plan that needs approval before anyone
+can read it is not a review aid. Sharing one policy would fail both ways: plan
+could never authenticate, and anything that could assume the read-only role could
+equally assume `AdministratorAccess`.
 
 That subject claim is **only minted when the job declares the environment**. So a
 required reviewer on the `dev` environment is a precondition for the AWS
 credential existing at all — not a button someone can route around. This is why
-the trust policy is scoped to `environment:` rather than to a branch `ref:`.
+the gated trust policy is scoped to `environment:` rather than to a branch `ref:`.
+
+**This only holds once the rule exists.** Terraform cannot configure GitHub, so it
+is a manual step after the first apply: *Settings → Environments → dev →* add a
+required reviewer and restrict deployment branches to `main`. Until then the
+`dev` environment has no protection rules and the gate is a label, not a control.
 
 ### ⚠️ Immutable subject claims
 
@@ -109,6 +120,30 @@ EXIT=$(aws ecs describe-tasks ... --query 'tasks[0].containers[0].exitCode')
 
 `wait tasks-stopped` returns for a *failed* task too. Without the exit-code check
 a broken migration deploys silently.
+
+### Migrations run on the NEW image
+
+`run-task` can override a container's command but not its image. So the workflow
+registers the new task-definition revision first and runs the migration on
+*that*. Running it on the service's current revision would execute the previous
+image's migrations — a new `.sql` file would land one deploy late, after the code
+that needs it is already serving.
+
+The consequence: during the rolling update old code runs against the new schema,
+so a migration must be backward compatible — add, never rename or drop, in one
+deploy.
+
+### "Stable" is not "deployed"
+
+The service has a deployment circuit breaker with rollback. A rolled-back service
+is perfectly stable, so `aws ecs wait services-stable` succeeds after a failed
+deploy. The workflow's last step compares the service's live task definition with
+the revision it registered and fails if they differ.
+
+Deploys are **not** gated on the CI workflows passing; they trigger on the same
+push. At this scale a bad push is caught by the circuit breaker rather than
+prevented. The production answer is `workflow_run` on a green CI, or a single
+pipeline.
 
 ## Concurrency, and why it differs per workflow
 

@@ -1,8 +1,18 @@
 # GitHub Actions authentication via OIDC. No long-lived access keys anywhere.
 #
-# Two roles, because a workflow that only needs to read should not be able to
-# write: `plan` runs on every pull request including from forks, `apply` runs
-# only behind an environment gate.
+# Three roles and TWO trust policies, because who may assume a role matters as
+# much as what it can do:
+#
+#   gated   deploy + terraform-apply. Assumable only by a job that declares
+#           `environment: dev`, so the environment's required reviewer stands in
+#           front of the credential.
+#   plan    terraform-plan, read-only. Assumable from a pull request or from main
+#           with no approval, because a plan nobody can see until someone approves
+#           it is not a review aid.
+#
+# One shared trust policy would be wrong in both directions: the plan job declares
+# no environment and could never assume its role, and anything allowed to assume
+# the read-only role could equally assume AdministratorAccess.
 
 data "aws_caller_identity" "current" {}
 
@@ -37,15 +47,29 @@ locals {
   # Both forms are listed so the role works either way and survives the
   # transition. StringEquals with a list is an OR, and every entry is exact —
   # no wildcard, so this does not widen the trust surface.
-  subjects = flatten([
-    for env in var.environments : [
-      "repo:${var.owner}/${var.repository}:environment:${env}",
-      "repo:${var.owner}@${var.owner_id}/${var.repository}@${var.repository_id}:environment:${env}",
-    ]
-  ])
+  repo_prefixes = [
+    "repo:${var.owner}/${var.repository}",
+    "repo:${var.owner}@${var.owner_id}/${var.repository}@${var.repository_id}",
+  ]
+
+  # What follows the repo in the `sub` claim, per trust policy. A job that
+  # declares `environment:` gets `environment:<name>` INSTEAD of its ref, which
+  # is why the plan job (no environment) needs its own entries. Fork pull
+  # requests are not a concern here: GitHub does not issue them an OIDC token.
+  subject_suffixes = {
+    gated = [for env in var.environments : "environment:${env}"]
+    plan  = ["pull_request", "ref:refs/heads/main"]
+  }
+
+  subjects = {
+    for trust, suffixes in local.subject_suffixes :
+    trust => [for pair in setproduct(local.repo_prefixes, suffixes) : "${pair[0]}:${pair[1]}"]
+  }
 }
 
 data "aws_iam_policy_document" "assume" {
+  for_each = local.subjects
+
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
 
@@ -54,14 +78,16 @@ data "aws_iam_policy_document" "assume" {
       identifiers = [local.provider_arn]
     }
 
-    # Scoped to `environment:`, not a branch ref. The environment subject is only
-    # minted when the job declares `environment:`, which makes GitHub's
-    # required-reviewer approval a precondition for the CREDENTIAL EXISTING —
-    # not merely a UI gate someone can skip.
+    # For the gated policy the subject is `environment:`, not a branch ref. That
+    # subject is only minted when the job declares `environment:`, which makes
+    # GitHub's required-reviewer approval a precondition for the CREDENTIAL
+    # EXISTING — provided the reviewer rule is actually configured on the
+    # environment in the repository settings. Terraform cannot see that; it is a
+    # manual step in docs/ci-cd.md.
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = local.subjects
+      values   = each.value
     }
 
     # Without this, any GitHub Actions token from any repository could be
@@ -79,7 +105,7 @@ data "aws_iam_policy_document" "assume" {
 # Pushes images and rolls ECS services. Cannot change infrastructure.
 resource "aws_iam_role" "deploy" {
   name               = "${var.name}-github-deploy"
-  assume_role_policy = data.aws_iam_policy_document.assume.json
+  assume_role_policy = data.aws_iam_policy_document.assume["gated"].json
   tags               = var.tags
 }
 
@@ -144,7 +170,7 @@ resource "aws_iam_role_policy" "deploy" {
 # Read-only. Used by plan-on-pull-request, which runs without approval.
 resource "aws_iam_role" "terraform_plan" {
   name               = "${var.name}-github-tf-plan"
-  assume_role_policy = data.aws_iam_policy_document.assume.json
+  assume_role_policy = data.aws_iam_policy_document.assume["plan"].json
   tags               = var.tags
 }
 
@@ -175,7 +201,7 @@ resource "aws_iam_role_policy" "plan_state" {
 # narrower policy: this role cannot be assumed without an approved deployment.
 resource "aws_iam_role" "terraform_apply" {
   name               = "${var.name}-github-tf-apply"
-  assume_role_policy = data.aws_iam_policy_document.assume.json
+  assume_role_policy = data.aws_iam_policy_document.assume["gated"].json
   tags               = var.tags
 }
 

@@ -82,16 +82,40 @@ few applies gives the real action list. Worth doing once the infrastructure stop
 changing shape, and not before, because a hand-written policy breaks silently the
 next time a resource type is added.
 
-## 9. Richer workflow visibility
+## 9. The rest of Claims Operations
+
+Implemented: retrieval, completeness validation, a pause that reads the reply and
+updates the claim, the escalation and second-review rules, and summary generation.
+Not implemented, each for the same reason — **there is no policies table**, so
+every one of them would be a migration plus seed rows that other tests assert
+against:
+
+- **FNOL intake** — accepting a first notification of loss and creating the claim.
+  Needs a write path and a required-fields definition per claim type; today
+  `missing_fields` is seeded per row rather than derived.
+- **Coverage verification** — "is this loss covered by their policy?" needs a
+  policies table with cover, limits and exclusions. Answering it from the RAG
+  corpus instead would be a confident guess about money, which is the one place
+  this system deliberately never guesses.
+- **Fraud indicators** — needs a claims history worth scoring and a definition of
+  a signal. Anything less is theatre.
+- **The runbook's "more than two open claims" escalation** — the rule is in the
+  seeded text, but `next_actions` cannot apply it on the `get_claim` path, which
+  loads one claim and never its siblings. Implementing it means either a second
+  query inside `assess` or widening `get_claim`; left out rather than applied on
+  only one of the two paths into the workflow, which would be worse than absent.
+
+## 10. Richer workflow visibility
 
 The UI shows the plan and an activity log. It does not show the graph.
 
 **Fix:** render the DAG with dependency edges drawn, node-level progress inside a
 running workflow, and the ability to inspect a completed task's tool results.
-`get_stream_writer()` already emits per-node progress; the frontend just
-aggregates it into a list today.
+Node-level progress would come from LangGraph's `custom` stream mode
+(`get_stream_writer()` inside a node); today only task-level status changes are
+streamed, derived from the `updates` channel.
 
-## 10. Blue/green deployments
+## 11. Blue/green deployments
 
 ECS native blue/green landed in AWS provider 6.4.0. Rolling updates plus the
 circuit breaker are adequate for a demo; blue/green would give a clean cutover and

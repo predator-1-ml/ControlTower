@@ -179,11 +179,6 @@ module "backend" {
     DB_SECRET_ARN = module.rds.master_user_secret_arn
   }
 
-  # Deliberately empty. The only secret here is the DB password, and an injected
-  # secret is not refreshed when it rotates — it would work for a week and then
-  # fail. See modules/ecs-service/main.tf.
-  secrets = {}
-
   health_check_command = [
     "CMD-SHELL",
     "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:${var.backend_port}/health').status==200 else 1)\"",
@@ -204,11 +199,33 @@ module "frontend" {
   security_group_id  = module.networking.frontend_sg_id
   target_group_arn   = module.alb_public.target_group_arn
   execution_role_arn = module.cluster.execution_role_arn
-  task_role_arn      = module.cluster.task_role_arn
   log_group_name     = module.cluster.log_group_names["frontend"]
+
+  # No task role. Next.js calls no AWS API — it only proxies to the backend —
+  # so sharing the backend's role would hand the one internet-facing container
+  # Bedrock invoke and the database password for nothing.
+  task_role_arn = null
 
   environment = {
     NODE_ENV = "production"
+
+    # Node closes idle keep-alive connections after 5s by default; the public ALB
+    # holds them for 300s. The ALB then reuses a socket Node has already closed
+    # and the browser gets an intermittent 502. Must exceed the ALB idle timeout —
+    # the same reason uvicorn runs with --timeout-keep-alive 305. Next's
+    # standalone server reads this variable (milliseconds).
+    KEEP_ALIVE_TIMEOUT = "305000"
+
+    # Operator sign-in. These are plain environment variables, so both values are
+    # readable in the task definition and in Terraform state (S3, encrypted,
+    # private). Accepted for ONE static demo credential. They are also exactly the
+    # case the `secrets` block IS right for — a secret that never rotates — and
+    # moving them to Secrets Manager + `secrets` injection is the first step if
+    # this outlived the demo. The RDS password is the opposite case; see
+    # modules/ecs-service/main.tf.
+    OPERATOR_USERNAME = var.operator_username
+    OPERATOR_PASSWORD = var.operator_password
+    SESSION_SECRET    = var.session_secret
 
     # The private domain name. Read at REQUEST time by the BFF route handler, so
     # the same image runs unchanged in every environment. There is deliberately

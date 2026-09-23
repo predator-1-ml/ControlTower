@@ -72,7 +72,7 @@ variations of one:
 | Workflow | Pattern | LLM used for |
 |---|---|---|
 | **Onboarding** | deterministic rules + conditional routing | nothing |
-| **Claims** | tool/API-driven | writing the summary only |
+| **Claims** | tool/API-driven | reading the operator's free-text reply, and writing the summary |
 | **Knowledge** | retrieval-augmented (pgvector) | answering from retrieved excerpts only |
 
 ## Request flow

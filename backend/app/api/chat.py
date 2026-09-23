@@ -13,6 +13,7 @@ from sse_starlette.sse import EventSourceResponse
 from app.api.schemas import ChatRequest, MessageView, SessionView, TaskView
 from app.api.streaming import sse, translate
 from app.graph.build import RECURSION_LIMIT
+from app.graph.state import new_state
 from app.llm.provider import message_text
 
 router = APIRouter()
@@ -45,6 +46,13 @@ async def chat(request: Request, body: ChatRequest) -> EventSourceResponse:
     `Command(resume=...)`. Running the planner instead would re-plan over a paused
     workflow and discard the answer the user just typed — the single most
     destructive ordering mistake available here.
+
+    **An empty message on a resume is an explicit skip**: "I do not have this
+    yet". Every pausing node treats an empty answer as nothing supplied, which is
+    the only honest reading of it. It is unambiguous on the wire because the
+    composer refuses to send an empty message any other way. On a fresh turn an
+    empty message is rejected: there is nothing to plan. Rejected: a `skip`
+    flag on the request — a second way to say the same thing.
     """
     graph = request.app.state.graph
     deps = request.app.state.deps
@@ -55,29 +63,24 @@ async def chat(request: Request, body: ChatRequest) -> EventSourceResponse:
 
     snapshot = await graph.aget_state(config)
     resuming = bool(snapshot.interrupts)
+    if not resuming and not body.message.strip():
+        raise HTTPException(status_code=422, detail="message is empty and nothing is paused")
 
     if resuming:
         payload: Any = Command(resume=body.message)
         trace_id = snapshot.values.get("trace_id", str(uuid.uuid4()))
     else:
         trace_id = str(uuid.uuid4())
+        # Seed every channel ONLY on a brand-new thread. Graph input is a write
+        # like any other: a channel with no reducer is overwritten by it, so
+        # seeding on every turn reset `customer_id` and `workflow_states` to empty
+        # and the second turn of a session forgot the first. Pinned by
+        # `test_second_turn_keeps_the_first_turns_context`.
+        seed = {} if snapshot.created_at else new_state(body.session_id, body.user_id, trace_id)
         payload = {
+            **seed,
             "messages": [HumanMessage(content=body.message)],
-            "session_id": body.session_id,
-            "user_id": body.user_id,
             "trace_id": trace_id,
-            # Seed the channels a brand-new thread needs. On an existing thread
-            # the checkpointer already holds these and they are ignored.
-            "plan": [],
-            "workflow_states": {},
-            "tool_results": [],
-            "errors": [],
-            "customer_id": None,
-            "current_intent": None,
-            "active_workflow": None,
-            "pending_question": None,
-            "final_response": None,
-            "schema_version": 1,
         }
 
     async def events():
@@ -90,11 +93,12 @@ async def chat(request: Request, body: ChatRequest) -> EventSourceResponse:
                 # No "values": interrupts arrive on "updates", and streaming full
                 # state snapshots would push the entire plan over the wire on
                 # every super-step for nothing.
-                stream_mode=["updates", "messages", "custom"],
+                stream_mode=["updates", "messages"],
                 subgraphs=True,
                 version="v2",
             )
-            async for frame in translate(stream, trace_id=trace_id):
+            known = {t.id: t.status.value for t in snapshot.values.get("plan", [])}
+            async for frame in translate(stream, trace_id=trace_id, known=known):
                 yield frame
             yield sse("done", {"trace_id": trace_id})
         except Exception as exc:  # noqa: BLE001 - must reach the client, not a 500 page

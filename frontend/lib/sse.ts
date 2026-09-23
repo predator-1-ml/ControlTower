@@ -27,10 +27,36 @@ export type ServerEvent = {
   data: Record<string, unknown>;
 };
 
+/**
+ * No stream opened: the fetch itself failed (`status` 0) or the answer was not a
+ * 2xx stream.
+ *
+ * A type carrying the status, not a formatted string, because the page branches
+ * on it: 0 and >= 502 mean "backend unreachable, start retrying", 409 means "a
+ * turn is already running". The old `chat failed (502): {"error":...}` message
+ * could only be printed, and it was — as an assistant chat turn, raw proxy JSON
+ * included.
+ *
+ * Anything thrown from here that is NOT a SendError happened after the stream
+ * opened, so the page knows a turn was running and must not offer the text back.
+ *
+ * What a SendError does NOT prove: that the backend never saw the message. With
+ * status 0 or 502 the request can have been delivered and the connection cut
+ * before any response byte came back — Node flushes headers with the first body
+ * chunk, and the planner takes a second or two to produce one. Observed, not
+ * theorised: the checkpoint held the HumanMessage while the browser saw a failed
+ * fetch. Hence the page says "no answer", never "not sent", and redraws from the
+ * checkpoint rather than from its own belief about what was delivered.
+ */
+export class SendError extends Error {
+  constructor(readonly status: number) {
+    super(`chat stream did not open (${status})`);
+  }
+}
+
 export async function streamChat(
   body: { session_id: string; message: string },
   onEvent: (event: ServerEvent) => void,
-  signal?: AbortSignal,
 ): Promise<void> {
   // Relative URL, deliberately: this is the BFF proxy (ADR-001). An absolute
   // URL here would require a publicly reachable backend and destroy the
@@ -39,13 +65,9 @@ export async function streamChat(
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
     body: JSON.stringify(body),
-    signal,
-  });
+  }).catch(() => null);
 
-  if (!response.ok || !response.body) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(`chat failed (${response.status}): ${detail.slice(0, 200)}`);
-  }
+  if (!response?.ok || !response.body) throw new SendError(response?.status ?? 0);
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();

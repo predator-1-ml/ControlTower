@@ -18,6 +18,12 @@ env:
   AWS_REGION: ap-southeast-1
   TF_VERSION: "1.16.3"
   WORKDIR: terraform/environments/dev
+  # Terraform reads TF_VAR_<name> as the value of variable <name>. These two have
+  # no default and cannot go in the committed dev tfvars. They are repository
+  # SECRETS, not `vars`, so they are masked in logs — though note they still end
+  # up in state and in the task definition (see environments/dev/main.tf).
+  TF_VAR_operator_password: ${{ secrets.OPERATOR_PASSWORD }}
+  TF_VAR_session_secret: ${{ secrets.SESSION_SECRET }}
 
 jobs:
   plan:

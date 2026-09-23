@@ -210,7 +210,7 @@ resource "aws_vpc_security_group_ingress_rule" "alb_public_https" {
   from_port         = 443
   to_port           = 443
   ip_protocol       = "tcp"
-  description       = "HTTPS from the internet"
+  description       = "HTTPS from the internet (listens only when a certificate is supplied)"
 }
 
 resource "aws_vpc_security_group_ingress_rule" "alb_public_http" {
@@ -219,7 +219,7 @@ resource "aws_vpc_security_group_ingress_rule" "alb_public_http" {
   from_port         = 80
   to_port           = 80
   ip_protocol       = "tcp"
-  description       = "HTTP, redirected to HTTPS at the listener"
+  description       = "HTTP from the internet (the demo has no certificate, so this is the listener in use)"
 }
 
 resource "aws_vpc_security_group_ingress_rule" "frontend_from_alb" {

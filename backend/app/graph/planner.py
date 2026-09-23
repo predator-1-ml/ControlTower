@@ -3,10 +3,12 @@
 Two properties matter more than the prompt:
 
 **It extends, it never replaces.** On a second turn the planner appends to the
-existing plan. That single choice is the entire mechanism for "a user may move
-between workflows during a session": new tasks join the DAG, tasks the user
-walked away from stay PENDING, and the supervisor picks them up again when they
-come back. There is no special case for switching workflows anywhere in the code.
+existing plan, so earlier tasks and their results stay in the DAG. Together with
+`workflow_states` (keyed per workflow) and `customer_id` persisting in the
+checkpoint, that is the whole mechanism for "a user may move between workflows
+during a session" — there is no special case for switching anywhere in the code.
+The limit: a session paused on `interrupt()` never reaches this node; `/chat`
+delivers the next message as the answer (see `docs/tradeoffs.md`).
 
 **Task ids are renumbered on merge.** The model emits local ids ("1", "2") every
 turn, which would collide with the previous turn's. Ids are rewritten to t1, t2…
@@ -31,8 +33,9 @@ complete capability, not a step:
 
 - onboarding : looks up the customer, verifies identity, checks eligibility and
                creates an application. Action: onboard_customer
-- claims     : finds the customer's claims, validates and summarises them.
-               Action: retrieve_claims
+- claims     : finds the customer's claims, checks them for missing information
+               (asking the handler for it if needed), applies the handling rules
+               and summarises them. Action: retrieve_claims
 - knowledge  : answers a policy or procedure question from internal documents.
                Action: answer_question
 
@@ -45,15 +48,36 @@ Rules:
   and check their claims" is two tasks, and the claims task depends on the
   onboarding task because it needs the customer identified first.
 - Do not invent dependencies between unrelated tasks.
-- Put references in args: customer_ref for CUST-1001, claim_ref for CLM-5001.
+- Put references in args: customer_ref for CUST-1001, claim_ref for CLM-5001,
+  and for a knowledge task the question itself as `question`.
 - A plain question about policy or procedure is a single knowledge task.
 - Most requests need one or two tasks. Never emit more than four.
 
 {existing}"""
 
-EXISTING_PLAN_NOTE = """The session already has these tasks. Plan ONLY the new
-work the latest message asks for; do not repeat existing tasks:
-{tasks}"""
+# "HANDLED — never plan them again" was the previous wording, and it named the
+# WORKFLOW as handled rather than the request: with `knowledge.answer_question {}
+# (done)` in the list, a second policy question got an empty plan about half the
+# time (probed twice against the live checkpoint, 2026-09-22: one run planned
+# it, the next planned nothing). The args are listed for the same reason — a
+# task whose args are empty cannot be told apart from a repeat of itself.
+EXISTING_PLAN_NOTE = """These tasks are already done in this session. Do not repeat them:
+{tasks}
+
+A new question, a new customer or a new claim is NEW work and needs a task,
+even in a workflow that has already run. Only an identical request is a repeat."""
+
+# The planner sees earlier requests so a follow-up ("and their claims?") can be
+# resolved, but they are fenced off from the one request it must plan. Handing
+# the model three bare human turns — the previous version — made it plan all
+# three: observed live, "Onboard CUST-1002" (already done) was planned a second
+# time alongside the new request, and the operator was asked for the same
+# documents twice.
+REQUEST = """Earlier requests in this session, for context only — do NOT plan these:
+{earlier}
+
+Plan ONLY this request:
+{latest}"""
 
 
 def _renumber(new_tasks: list[PlanTask], offset: int) -> list[PlanTask]:
@@ -78,8 +102,11 @@ async def plan_node(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[st
 
     existing_note = ""
     if existing:
+        # args included: without them "onboarding.onboard_customer (done)" does
+        # not say WHICH customer was onboarded, so the model cannot tell a
+        # repeat from new work.
         listed = "\n".join(
-            f"- {t.id}: {t.workflow}.{t.action} ({t.status.value})" for t in existing
+            f"- {t.id}: {t.workflow}.{t.action} {t.args} ({t.status.value})" for t in existing
         )
         existing_note = EXISTING_PLAN_NOTE.format(tasks=listed)
 
@@ -87,10 +114,16 @@ async def plan_node(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[st
     # exception: the planner runs on every turn, and one bad parse must not kill
     # a session that already has work in flight.
     planner = runtime.context.model.with_structured_output(Plan, include_raw=True)
+    requests = [str(m.content) for m in state["messages"] if isinstance(m, HumanMessage)]
     result = await planner.ainvoke(
         [
             SystemMessage(content=SYSTEM_PROMPT.format(existing=existing_note)),
-            *[m for m in state["messages"] if isinstance(m, HumanMessage)][-3:],
+            HumanMessage(
+                content=REQUEST.format(
+                    earlier="\n".join(f"- {r}" for r in requests[-3:-1]) or "(none)",
+                    latest=requests[-1],
+                )
+            ),
         ]
     )
 
@@ -111,5 +144,6 @@ async def plan_node(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[st
     tasks = _renumber(parsed.tasks, offset=len(existing))
     return {
         "plan": tasks,  # merge_tasks appends; existing tasks are untouched
+        "turn_task_ids": [t.id for t in tasks],
         "current_intent": parsed.goal,
     }

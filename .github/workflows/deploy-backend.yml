@@ -21,7 +21,12 @@ env:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    # An arm64 runner, because the task definition is ARM64 (Graviton, ~20%
+    # cheaper on Fargate). `ubuntu-latest` is x64: the image would build, push and
+    # register without complaint, then die on ECS with `exec format error`.
+    # Rejected: QEMU emulation via buildx on an x64 runner — works, several times
+    # slower. arm64 hosted runners are free for public repositories.
+    runs-on: ubuntu-24.04-arm
 
     # The environment is load-bearing, not decoration. The OIDC subject claim
     # only contains `environment:dev` when the job declares it — and the trust
@@ -45,9 +50,6 @@ jobs:
       - id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # Native arm64, matching runtime_platform.cpu_architecture = ARM64 in the
-      # task definition. Building arm64 under QEMU on an x64 runner works but is
-      # slow enough to be worth avoiding.
       - name: Build and push
         id: image
         env:
@@ -65,6 +67,30 @@ jobs:
           echo "image=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "Deploying $DIGEST"
 
+      # Register the new revision FIRST, so migrations can run on it.
+      #
+      # `run-task` can override a container's command but not its image. Running
+      # the migration on the service's CURRENT task definition would therefore
+      # execute the PREVIOUS image's migrations: a new .sql file would land one
+      # deploy late, after the code that needs it is already serving traffic. (On
+      # the very first deploy it is worse — the current image is Terraform's
+      # placeholder, which has no Python in it.)
+      #
+      # The `del(...)` strips the read-only fields describe returns and register
+      # rejects.
+      - name: Register task definition revision
+        id: taskdef
+        run: |
+          set -euo pipefail
+          aws ecs describe-task-definition             --task-definition "$ECS_SERVICE" --query taskDefinition           | jq --arg image "${{ steps.image.outputs.image }}" '
+              .containerDefinitions[0].image = $image
+              | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                    .compatibilities, .registeredAt, .registeredBy)' > taskdef.json
+
+          ARN=$(aws ecs register-task-definition --cli-input-json file://taskdef.json             --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "arn=$ARN" >> "$GITHUB_OUTPUT"
+          echo "Registered $ARN"
+
       # Migrations run as a ONE-OFF task before the service update.
       #
       # Not at app startup: N tasks would race the same migration, and
@@ -72,20 +98,14 @@ jobs:
       # UniqueViolation and concurrent CREATE INDEX CONCURRENTLY can leave an
       # INVALID index behind. One process, one advisory lock, before anything
       # else starts. See backend/app/scripts/migrate.py.
+      #
+      # Consequence worth knowing: for the length of the rolling update the OLD
+      # code runs against the NEW schema, so migrations must be backward
+      # compatible (add, never rename or drop, in one deploy).
       - name: Run migrations
         run: |
           set -euo pipefail
-          TASK_DEF=$(aws ecs describe-services \
-            --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
-            --query 'services[0].taskDefinition' --output text)
-
-          TASK_ARN=$(aws ecs run-task \
-            --cluster "$ECS_CLUSTER" \
-            --task-definition "$TASK_DEF" \
-            --launch-type FARGATE \
-            --network-configuration "awsvpcConfiguration={subnets=[${{ vars.PRIVATE_SUBNET_IDS }}],securityGroups=[${{ vars.BACKEND_SG_ID }}],assignPublicIp=DISABLED}" \
-            --overrides '{"containerOverrides":[{"name":"'"$CONTAINER_NAME"'","command":["python","-m","app.scripts.migrate"]}]}' \
-            --query 'tasks[0].taskArn' --output text)
+          TASK_ARN=$(aws ecs run-task             --cluster "$ECS_CLUSTER"             --task-definition "${{ steps.taskdef.outputs.arn }}"             --launch-type FARGATE             --network-configuration "awsvpcConfiguration={subnets=[${{ vars.PRIVATE_SUBNET_IDS }}],securityGroups=[${{ vars.BACKEND_SG_ID }}],assignPublicIp=DISABLED}"             --overrides '{"containerOverrides":[{"name":"'"$CONTAINER_NAME"'","command":["python","-m","app.scripts.migrate"]}]}'             --query 'tasks[0].taskArn' --output text)
 
           aws ecs wait tasks-stopped --cluster "$ECS_CLUSTER" --tasks "$TASK_ARN"
 
@@ -93,32 +113,22 @@ jobs:
           # stopped because it FAILED. The exit code is the only thing that says
           # whether the migration worked, so check it explicitly or a broken
           # migration deploys silently.
-          EXIT=$(aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$TASK_ARN" \
-            --query 'tasks[0].containers[0].exitCode' --output text)
+          EXIT=$(aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$TASK_ARN"             --query 'tasks[0].containers[0].exitCode' --output text)
           echo "migration exit code: $EXIT"
           [ "$EXIT" = "0" ] || { echo "::error::migration failed"; exit 1; }
 
-      - name: Render task definition
-        id: taskdef
+      - name: Roll the service onto the new revision
         run: |
-          aws ecs describe-task-definition \
-            --task-definition control-tower-dev-backend \
-            --query taskDefinition > taskdef.json
-          echo "path=taskdef.json" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE"             --task-definition "${{ steps.taskdef.outputs.arn }}" > /dev/null
 
-      - uses: aws-actions/amazon-ecs-render-task-definition@v1
-        id: render
-        with:
-          task-definition: ${{ steps.taskdef.outputs.path }}
-          container-name: ${{ env.CONTAINER_NAME }}
-          image: ${{ steps.image.outputs.image }}
+          # Polls every 15s for up to 10 minutes.
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
 
-      - uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.render.outputs.task-definition }}
-          service: ${{ env.ECS_SERVICE }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
-          # Without this the SDK backs off to 600s between polls and the job
-          # looks hung for ten minutes after the deploy has already finished.
-          wait-for-minutes: 10
+          # "Stable" is not "deployed". The service has a deployment circuit
+          # breaker with rollback: if the new tasks keep failing health checks ECS
+          # rolls back to the previous revision — and a rolled-back service is
+          # perfectly stable. Without this check a failed deploy goes green.
+          LIVE=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"             --query 'services[0].taskDefinition' --output text)
+          [ "$LIVE" = "${{ steps.taskdef.outputs.arn }}" ] || {
+            echo "::error::circuit breaker rolled back to $LIVE"; exit 1; }

@@ -18,10 +18,11 @@ terraform/
 ## The bootstrap chicken-and-egg
 
 Every stack keeps state in S3, but the bucket must exist before a backend can
-point at it. So `bootstrap/` keeps its own state **locally** and is committed.
+point at it. So `bootstrap/` keeps its own state **locally**, on the machine that
+ran it (`*.tfstate` is gitignored, so it is not in the repository).
 
 That is normally a smell. It is acceptable here because the stack is ~20 lines,
-changes essentially never, and contains nothing sensitive.
+changes essentially never, and losing its state costs one `terraform import`.
 
 ```bash
 cd terraform/bootstrap && terraform init && terraform apply
@@ -32,7 +33,7 @@ cd ../environments/dev && terraform init && terraform apply
 
 ```hcl
 backend "s3" {
-  bucket       = "control-tower-tfstate"
+  bucket       = "control-tower-tfstate-187880375508"
   key          = "dev/terraform.tfstate"
   region       = "ap-southeast-1"
   encrypt      = true
@@ -120,8 +121,12 @@ To tear down after recording the demo:
 
 ```bash
 terraform destroy
-cd ../../bootstrap && terraform destroy   # only if you are finished entirely
 ```
+
+The state bucket in `bootstrap/` is deliberately NOT part of that: it has
+`prevent_destroy` and versioning, so `terraform destroy` there fails by design.
+An empty versioned bucket costs nothing; to remove it, empty every object version
+in the console, drop `prevent_destroy`, then destroy.
 
 `force_delete = true` on ECR and `skip_final_snapshot = true` on RDS exist so
 `destroy` completes without manual cleanup or a snapshot that keeps billing.

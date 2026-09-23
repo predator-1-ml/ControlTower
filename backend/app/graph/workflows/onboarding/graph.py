@@ -81,7 +81,14 @@ async def load_customer(state: ControlTowerState, runtime: Runtime[Deps]) -> dic
     )
 
     return {
-        "workflow_states": _merge(state, customer=customer, customer_ref=ref),
+        # REPLACE this workflow's slice, do not merge into it. `workflow_states`
+        # outlives the turn, so onboarding a second customer in one session would
+        # otherwise inherit the first one's `application` or `review_reason`, and
+        # compose would report both. Other workflows' slices are left untouched.
+        "workflow_states": {
+            **state.get("workflow_states", {}),
+            WORKFLOW: {"customer": customer, "customer_ref": ref},
+        },
         # Publish to shared state so a later claims task can depend on it without
         # re-reading the database. This is how "onboard X and check their claims"
         # passes context between two different workflows.
@@ -124,8 +131,27 @@ async def request_information(state: ControlTowerState) -> dict[str, Any]:
             "fields": missing,
         }
     )
-    customer = {**(_ws(state).get("customer") or {}), **(supplied or {})}
-    return {"workflow_states": _merge(state, customer=customer, missing_fields=[])}
+    # `/chat` resumes with the operator's free text, never a dict, so it is
+    # recorded as given rather than unpacked into the customer record (`**text`
+    # raises TypeError and, because the thread stays parked on this interrupt,
+    # every later message would resume into the same crash). Turning "born
+    # 1990-01-01" into fields is language work this workflow deliberately has none of.
+    #
+    # An empty answer is the operator's explicit skip (api/chat.py): the fields
+    # stay missing and the application goes to a person instead of proceeding
+    # as if they had been supplied.
+    answered = bool(str(supplied).strip())
+    return {
+        "workflow_states": _merge(
+            state, supplied=supplied, missing_fields=[] if answered else missing
+        )
+    }
+
+
+def route_after_information(
+    state: ControlTowerState,
+) -> Literal["verify_identity", "manual_review"]:
+    return "manual_review" if _ws(state).get("missing_fields") else "verify_identity"
 
 
 async def verify_identity(state: ControlTowerState) -> dict[str, Any]:
@@ -162,7 +188,22 @@ async def request_documents(state: ControlTowerState) -> dict[str, Any]:
             "fields": ["photo_id", "proof_of_address"],
         }
     )
-    return {"workflow_states": _merge(state, documents=documents, kyc="verified")}
+    # Verified only if something was supplied. Before this, ANY reply verified
+    # identity — including "no" — and a skipped request would have too. The
+    # workflow still does not inspect the documents (that is a regulated decision
+    # made elsewhere); it only refuses to verify on nothing.
+    answered = bool(str(documents).strip())
+    return {
+        "workflow_states": _merge(
+            state, documents=documents, kyc="verified" if answered else _ws(state).get("kyc")
+        )
+    }
+
+
+def route_after_documents(
+    state: ControlTowerState,
+) -> Literal["check_eligibility", "manual_review"]:
+    return "check_eligibility" if _ws(state).get("kyc") == "verified" else "manual_review"
 
 
 async def check_eligibility(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[str, Any]:
@@ -239,11 +280,14 @@ async def create_application(state: ControlTowerState, runtime: Runtime[Deps]) -
 
 async def manual_review(state: ControlTowerState) -> dict[str, Any]:
     ws = _ws(state)
-    reason = (
-        "identity verification failed"
-        if ws.get("kyc") == "failed"
-        else f"existing active claim(s): {', '.join(ws.get('active_claims', []))}"
-    )
+    if ws.get("missing_fields"):
+        reason = f"customer details not supplied: {', '.join(ws['missing_fields'])}"
+    elif ws.get("kyc") == "failed":
+        reason = "identity verification failed"
+    elif ws.get("kyc") != "verified":
+        reason = "identity documents not supplied"
+    else:
+        reason = f"existing active claim(s): {', '.join(ws.get('active_claims', []))}"
     return _finish(state, "manual_review", review_reason=reason)
 
 
@@ -269,13 +313,17 @@ def build_onboarding_graph(checkpointer=None):
         .add_conditional_edges(
             "validate", route_after_validate, ["request_information", "verify_identity"]
         )
-        .add_edge("request_information", "verify_identity")
+        .add_conditional_edges(
+            "request_information", route_after_information, ["verify_identity", "manual_review"]
+        )
         .add_conditional_edges(
             "verify_identity",
             route_after_verify,
             ["manual_review", "request_documents", "check_eligibility"],
         )
-        .add_edge("request_documents", "check_eligibility")
+        .add_conditional_edges(
+            "request_documents", route_after_documents, ["check_eligibility", "manual_review"]
+        )
         .add_conditional_edges(
             "check_eligibility",
             route_after_eligibility,
