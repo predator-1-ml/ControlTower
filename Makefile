@@ -50,8 +50,8 @@ dev: ## Run the backend locally on :8000
 ingest: ## Embed knowledge chunks (needs live AWS credentials)
 	cd $(BACKEND) && .venv/Scripts/python.exe -m app.scripts.ingest
 
-seed: ## Load demo fixtures (safe to re-run; truncates first)
-	docker compose exec -T postgres psql -U control_tower -d control_tower -v ON_ERROR_STOP=1 -q < data/seed/seed.sql
+seed: ## Load demo fixtures (safe to re-run; truncates first, so run ingest after)
+	cd $(BACKEND) && .venv/Scripts/python.exe -m app.scripts.seed
 
 test: ## Run unit tests (no database needed)
 	cd $(BACKEND) && .venv/Scripts/python.exe -m pytest tests/ -q

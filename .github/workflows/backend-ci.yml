@@ -61,12 +61,13 @@ jobs:
         working-directory: backend
         run: uv run python -m app.scripts.migrate
 
-      # `-i` is load-bearing. Without it `docker exec` does not attach stdin, so
-      # psql receives no SQL, runs nothing and exits 0 — the step goes green and
-      # every seed-dependent test then fails on `None`, pointing at the tests
-      # rather than at the seed that never loaded.
+      # The same script the deployed stack is seeded with, so CI proves the path
+      # production uses. (It replaced a `docker exec psql < file` step whose
+      # missing `-i` once ran nothing and went green.)
       - name: Seed
-        run: |
+        working-directory: backend
+        run: uv run python -m app.scripts.seed
+|
           docker exec -i $(docker ps -q --filter ancestor=pgvector/pgvector:pg17) \
             psql -U control_tower -d control_tower -v ON_ERROR_STOP=1 \
             < data/seed/seed.sql

@@ -47,7 +47,7 @@ from app.llm.provider import message_text
 
 WORKFLOW = "claims"
 
-#: Both thresholds are quoted from the seeded policy text (`data/seed/seed.sql`),
+#: Both thresholds are quoted from the seeded policy text (`backend/seed/seed.sql`),
 #: not chosen here. A test asserts these exact numbers appear in that text —
 #: which is what makes `docs/assumptions.md`'s "code and policy agree" checkable
 #: rather than merely claimed.

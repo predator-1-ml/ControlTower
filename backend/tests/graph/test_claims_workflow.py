@@ -480,7 +480,7 @@ def test_the_thresholds_in_code_are_the_thresholds_in_the_policy_text():
     If someone tunes one number, these are two sources of truth for the same rule
     and a handler gets two different answers in the same session.
     """
-    seed = Path(__file__).resolve().parents[3] / "data" / "seed" / "seed.sql"
+    seed = Path(__file__).resolve().parents[2] / "seed" / "seed.sql"
     # The policy text is stored as adjacent SQL string literals wrapped across
     # lines, so a sentence is split by `' \n '`. Join them back, or the assertion
     # only proves the sentence is absent from one particular line-wrapping.

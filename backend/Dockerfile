@@ -41,6 +41,9 @@ COPY --chown=appuser:appuser app ./app
 # .sql files must be in it. Without them the glob is empty and the task exits 0
 # having created nothing — a green deploy onto a database with no tables.
 COPY --chown=appuser:appuser migrations ./migrations
+# Same reason: the seed task runs this image too (`python -m app.scripts.seed`).
+# RDS is private, so the fixture has to travel inside the image to reach it.
+COPY --chown=appuser:appuser seed ./seed
 
 USER appuser
 EXPOSE 8000
