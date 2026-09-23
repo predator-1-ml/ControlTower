@@ -45,6 +45,10 @@ function outcomeText(workflow: (typeof WORKFLOWS)[number], states: WorkflowState
     if (outcome === "information_incomplete")
       return `Still awaiting: ${(ws.missing_fields ?? []).map(words).join(", ")}`;
     if (outcome === "no_claims") return "No open claims";
+    if (outcome === "not_found") return "Customer or claim not found";
+    if (outcome === "registered")
+      return `${(ws.claims ?? []).map((c) => c.claim_ref).join(", ")} registered`;
+    if (outcome === "not_registered") return "Not registered";
   }
   if (workflow === "knowledge") {
     // `citations` is every passage retrieved, not the ones the answer quotes —
@@ -58,11 +62,8 @@ function outcomeText(workflow: (typeof WORKFLOWS)[number], states: WorkflowState
 
 /**
  * Who this session is about, from what the workflows recorded. Onboarding keeps
- * the customer it loaded; a claim looked up by reference carries its customer.
- * A customer named only to list their active claims is not recorded by the
- * claims slice (repository.get_active_claims returns no customer columns), so
- * that one path shows the claims alone — stated here rather than patched with a
- * graph change.
+ * the customer it loaded; every claim row carries its customer, whichever way
+ * it was reached (all claim queries join the customer table).
  */
 function contextText(states: WorkflowStates): string {
   const onboarding = states.onboarding;

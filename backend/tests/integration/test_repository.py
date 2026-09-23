@@ -16,6 +16,8 @@ import pytest
 from app.db.checkpointer import open_pool
 from app.db.repository import (
     create_application,
+    create_claim,
+    find_customers,
     get_active_claims,
     get_claim,
     get_customer,
@@ -129,6 +131,54 @@ async def test_a_partial_supply_removes_only_that_field_and_holds_the_status(poo
                 "missing_fields = '[\"incident_report\", \"police_reference\"]'::jsonb "
                 "WHERE claim_ref = 'CLM-5003'"
             )
+
+
+async def test_active_claims_carry_their_owner(pool):
+    """Every claim query joins the customer, so the Session card can name the
+    customer after "any claims for CUST-1008?" and the claims workflow can
+    publish the customer in focus on that path too."""
+    customer = await get_customer(pool, "CUST-1008")
+    claims = await get_active_claims(pool, customer["id"])
+
+    assert len(claims) == 3, "the seed gives CUST-1008 three open claims for the escalation rule"
+    assert {c["customer_ref"] for c in claims} == {"CUST-1008"}
+    assert claims[0]["customer_name"] == "Hiro Tanaka"
+    assert claims[0]["customer_id"] == customer["id"]
+
+
+async def test_create_claim_mints_a_reference_and_refuses_a_taken_one(pool):
+    """Both halves of the INSERT's contract, against the real sequence and the
+    real unique index: a reference is minted when none is given, and a taken
+    reference comes back as None rather than a `UniqueViolation`."""
+    customer = await get_customer(pool, "CUST-1005")
+    minted = None
+    try:
+        minted = await create_claim(
+            pool, customer_id=customer["id"], claim_ref=None, claim_type="travel",
+            amount=300, incident_date="2026-09-01", missing_fields=[],
+        )
+        assert minted["claim_ref"].startswith("CLM-9")
+        assert minted["status"] == "open"
+        assert minted["customer_ref"] == "CUST-1005"
+        assert minted["amount"] == 300.0 and minted["incident_date"] == "2026-09-01"
+
+        # A document outstanding starts the claim in the status the pause reads.
+        assert (await create_claim(
+            pool, customer_id=customer["id"], claim_ref="CLM-5001", claim_type="motor",
+            amount=None, incident_date=None, missing_fields=["incident_report"],
+        )) is None, "CLM-5001 is seeded; the INSERT must be a no-op"
+    finally:
+        if minted:
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "DELETE FROM claims WHERE claim_ref = %s", (minted["claim_ref"],)
+                )
+
+
+async def test_find_customers_by_name(pool):
+    """Substring, case-insensitive, and empty for a name nobody has."""
+    assert [c["external_ref"] for c in await find_customers(pool, "tanaka")] == ["CUST-1008"]
+    assert await find_customers(pool, "Nobody Here") == []
 
 
 async def test_create_application(pool):

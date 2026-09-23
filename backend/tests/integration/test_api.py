@@ -341,3 +341,63 @@ async def test_unknown_session_is_404(app_client):
     client, _ = app_client
     response = await client.get(f"/sessions/does-not-exist-{uuid.uuid4()}")
     assert response.status_code == 404
+
+
+PLAN_REGISTER = Plan(
+    goal="Register a travel claim for CUST-1005",
+    tasks=[
+        PlanTask(id="1", workflow="claims", action="register_claim",
+                 args={"customer_ref": "CUST-1005", "claim_type": "travel",
+                       "amount": "450", "incident_date": "2026-09-12"})
+    ],
+)
+
+
+async def test_registering_a_claim_writes_the_row_and_names_the_customer(app_client):
+    """The write path end to end: a minted reference, a row a later lookup finds,
+    and the customer published to the session so "their claims" resolves next turn.
+
+    Cleaned up afterwards: CUST-1005 is the seed's "no claims, clean onboarding"
+    customer, and leaving a claim on them would turn that branch into manual review.
+    """
+    client, app = app_client
+    app.state.deps.model = StubModel(PLAN_REGISTER)
+    session = f"api-{uuid.uuid4()}"
+
+    events = await _collect_sse(client, {
+        "session_id": session,
+        "message": "register a travel claim for CUST-1005, 450, incident 2026-09-12",
+    })
+    assert not any(name == "interrupt" for name, _ in events), "everything was stated"
+    assert "registered the claim" in [p.get("label") for n, p in events if n == "step"]
+
+    state = (await client.get(f"/sessions/{session}")).json()
+    claim = state["workflow_states"]["claims"]["claims"][0]
+    from app.db.checkpointer import open_pool
+
+    pool = await open_pool()
+    try:
+        try:
+            assert state["workflow_states"]["claims"]["outcome"] == "registered"
+            assert claim["claim_ref"].startswith("CLM-9")
+            assert claim["status"] == "open" and claim["customer_ref"] == "CUST-1005"
+
+            async with pool.connection() as conn:
+                cur = await conn.execute(
+                    "SELECT claim_type, amount FROM claims WHERE claim_ref = %s",
+                    (claim["claim_ref"],),
+                )
+                row = await cur.fetchone()
+            assert row["claim_type"] == "travel" and float(row["amount"]) == 450.0
+
+            snapshot = await app.state.graph.aget_state(
+                {"configurable": {"thread_id": session}}
+            )
+            assert snapshot.values["customer_ref"] == "CUST-1005"
+        finally:
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "DELETE FROM claims WHERE claim_ref = %s", (claim["claim_ref"],)
+                )
+    finally:
+        await pool.close()

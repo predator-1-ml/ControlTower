@@ -49,7 +49,10 @@ If none is given, do not write one.
 Rules:
 - Use only the facts given. Do not infer, soften, or add advice.
 - Refer to things the way the handler does: CLM- and CUST- references and names.
-- Copy amounts, dates and anything in [square brackets] exactly as given.
+- Copy amounts, dates and citations (which look like [document, section]) exactly
+  as given. Do not put square brackets around anything else.
+- A result marked "written below this answer" is complete. Mention it in one
+  clause at most, and never add a reference or a detail to it.
 - If something could not be completed, say so plainly. Never report only what worked.
 - Plain text. Short lines. "- " for a list. No headings, no preamble."""
 
@@ -115,6 +118,8 @@ def claims_facts(ws: dict[str, Any]) -> list[str]:
         return ["No active claims were found for this customer."]
 
     lines: list[str] = []
+    if ws.get("registered"):
+        lines.append("Registered this turn.")
 
     received = ws.get("received") or {}
     if received:
@@ -240,10 +245,26 @@ def model_input(state: ControlTowerState) -> str | None:
     turn = _turn_tasks(state)
 
     sections: list[str] = []
+    written: list[str] = []
     for workflow in _done_workflows(state, turn):
         ws = slices.get(workflow, {})
+        if _text_of(ws):
+            # One TRUE line for a workflow whose text follows verbatim, with the
+            # real reference. Observed live on "onboard CUST-1005 and log a
+            # travel claim": with this workflow absent from the facts, the
+            # model — told to use CLM- references, shown none — wrote "The
+            # claim reference number is CLM-20230912-1005-01"; told instead
+            # that the claim was "answered separately below", it reported the
+            # claim as pending. Shown the fact, it has nothing to invent and
+            # nothing to misread.
+            refs = ", ".join(c["claim_ref"] for c in ws.get("claims") or [] if c.get("claim_ref"))
+            written.append(
+                TITLES[workflow] + "\n- Done" + (f": {refs}" if refs else "")
+                + ". The full result is written below this answer; do not repeat or add to it."
+            )
+            continue
         builder = FACTS.get(workflow)
-        if _text_of(ws) or builder is None:
+        if builder is None:
             continue
         lines = builder(ws)
         if lines:
@@ -263,9 +284,16 @@ def model_input(state: ControlTowerState) -> str | None:
     if problems:
         sections.append("Could not complete\n" + "\n".join(problems))
 
+    # Nothing to narrate means no model call — including a turn whose every
+    # workflow wrote its own text. Given only "Done" lines and the request,
+    # the model answered the request itself: observed live, "when does a motor
+    # claim need a second review, and do they have other claims?" produced an
+    # invented rule and "CUST-22914 has no other open claims" above the two
+    # correct texts.
     if not sections:
         return None
-    return f'Operator\'s request: "{_request(state)}"\n\n' + "\n\n".join(sections)
+
+    return f'Operator\'s request: "{_request(state)}"\n\n' + "\n\n".join(sections + written)
 
 
 #: Written in code, not by the model. This path used to hand the model a prompt

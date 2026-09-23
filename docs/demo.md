@@ -102,6 +102,22 @@ Supply only one of the two ("the police reference is PR-77431") and it asks agai
 for just the other. Supply neither and the pause ends honestly: the claim is
 reported as still waiting, not quietly completed.
 
+Then the write path, without naming the customer:
+
+> **"Register a new claim for them, CLM-7007, 100,000."**
+
+**What to point at:** the plan shows `claims.register_claim`, and the question
+that follows is addressed to CUST-1004 — the planner read "them" from the
+answer above and the customer the claims workflow published. The type was never
+stated, so it asks for exactly the type and the incident date, nothing else.
+Answer in plain words ("property, the incident was on 20 September") and the
+claim is created: `awaiting_information` with the incident report recorded as
+outstanding, and the escalation rule already applied because 100,000 exceeds
+10,000. Ask "who is the duty manager" at any point and the runbook's rota answers.
+
+> **Repeating this beat:** `DELETE FROM claims WHERE claim_ref = 'CLM-7007';`
+> or leave the reference out and one is assigned (CLM-9001 onwards).
+
 > **Repeating this beat:** it mutates the seed. Put CLM-5003 back with
 > ```sql
 > UPDATE claims SET status = 'awaiting_information',

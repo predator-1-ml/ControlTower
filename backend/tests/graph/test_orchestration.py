@@ -418,6 +418,42 @@ async def test_a_mixed_turn_appends_the_written_text_verbatim():
     assert result["final_response"] == "CUST-1001 went to manual review.\n\n" + answer
 
 
+async def test_two_workflows_that_both_wrote_text_make_no_model_call():
+    """Given only "Done" lines and the request, the model answers the request
+    itself. Observed live: an invented second-review rule and a customer
+    reference that does not exist, above the two correct texts."""
+    answer = "Motor claims of 5000 or more need a second review [claims-handling-policy.md, Motor]."
+    state = composable(
+        knowledge={"outcome": "answered", "answer": answer},
+        claims={"outcome": "summarised", "summary": "Claim CLM-9022 is open.",
+                "claims": [{"claim_ref": "CLM-9022"}]},
+    )
+    model = StubModel(reply="CUST-22914 has no other open claims.")
+
+    result = await compose_response(state, Runtime(context=deps(model)))
+
+    assert model.calls == 0
+    assert result["final_response"] == answer + "\n\nClaim CLM-9022 is open."
+
+
+def test_a_mixed_turn_names_what_is_reported_separately():
+    """The model is told which half of the request its text must not answer.
+
+    Observed live: "onboard CUST-1005 and log a travel claim" — the claim's
+    summary was appended verbatim, the fact block held only onboarding, and the
+    model invented a claim reference for the half it was not shown.
+    """
+    state = composable(
+        onboarding={"outcome": "application_created"},
+        claims={"outcome": "registered", "summary": "Claim CLM-9012 registered.",
+                "claims": [{"claim_ref": "CLM-9012"}]},
+    )
+    prompt = model_input(state)
+    # The real reference, as one done line — not the summary, which follows verbatim.
+    assert "Claims\n- Done: CLM-9012. The full result is written below this answer" in prompt
+    assert "Claim CLM-9012 registered." not in prompt
+
+
 # ------------------------------------------------------------- the step trail
 
 

@@ -40,7 +40,8 @@ would over-escalate every large travel and property claim.
 
 ## Scale
 
-**Demo scale: tens of sessions, thousands of rows, five knowledge documents.**
+**Demo scale: tens of sessions, thousands of rows, sixteen policy passages across
+three documents.**
 Consequences that are honest rather than hidden:
 
 - The HNSW index is not load-bearing. Below ~50k vectors exact search is 100%
@@ -81,9 +82,20 @@ Both were checked against the live account rather than assumed, because
 
 ## Data
 
-**Seed fixtures are load-bearing, not decoration.** Each of the four customers
-drives a different workflow branch, and integration tests assert against them.
-Changing the seed can silently stop exercising a branch.
+**Seed fixtures are load-bearing, not decoration.** The first four customers and
+first three claims are the ones the tests and the demo runbook name; the other
+eight customers cover the remaining branches (the age rejection, a pending KYC
+status, more than two open claims, closed-only history) and give the book enough
+shape that a wrong retrieval or a wrong active-claims filter is visible. Each
+row's comment in `backend/seed/seed.sql` says which branch it is for. Changing
+the seed can silently stop exercising a branch.
+
+**Registering a claim asks once, then decides.** The claim type is the only
+detail refused over — it is NOT NULL and the handling rules key on it. An amount
+or incident date not yet known is recorded as unknown, which is what first
+notice of loss looks like; the required incident report is recorded as
+outstanding rather than chased in the same turn. Quoted from the seeded policy
+("Registering a claim") and checked by the same test as the thresholds.
 
 **`missing_fields` is persisted on the claim** rather than re-derived at runtime,
 so the reason a workflow paused is auditable after the fact.

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
@@ -21,7 +22,9 @@ from app.graph.deps import Deps
 from app.graph.state import PlanTask, TaskStatus, new_state
 from app.graph.workflows.claims.graph import (
     ESCALATION_LIMIT,
+    REQUIRED_DOCUMENTS,
     SECOND_REVIEW_LIMIT,
+    ClaimDetails,
     build_claims_graph,
     next_actions,
 )
@@ -60,15 +63,18 @@ class StubModel:
         reply: str = "Claim summary.",
         fields: list[tuple[str, str]] | None = None,
         raises: Exception | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         self.reply = reply
         self.fields = fields or []
         self.raises = raises
+        # What the model claims a registration reply contained (`ClaimDetails`).
+        self.details = details or {}
         self.calls: list[str] = []
         self._schema: Any = None
 
     def with_structured_output(self, schema, **_kw):
-        clone = StubModel(self.reply, self.fields, self.raises)
+        clone = StubModel(self.reply, self.fields, self.raises, self.details)
         clone._schema = schema
         clone.calls = self.calls  # one shared record of what the model was asked
         return clone
@@ -82,7 +88,12 @@ class StubModel:
             # named in the test.
             if self.raises is not None:
                 raise self.raises
-            parsed = self._schema(supplied=[{"name": n, "value": v} for n, v in self.fields])
+            if self._schema is ClaimDetails:
+                parsed = ClaimDetails(**self.details)
+            else:
+                parsed = self._schema(
+                    supplied=[{"name": n, "value": v} for n, v in self.fields]
+                )
             return {"parsed": parsed, "raw": None, "parsing_error": None}
         return StubResponse(self.reply)
 
@@ -154,15 +165,24 @@ def db_returns(monkeypatch):
     return _set
 
 
-def make_state(*, task_args: dict | None = None):
-    """State as the supervisor hands it over: one task already RUNNING."""
+def make_state(
+    *, task_args: dict | None = None, action: str = "retrieve_claims", request: str = ""
+):
+    """State as the supervisor hands it over: one task already RUNNING.
+
+    `request` is what the handler typed. The register path keeps a reference or
+    a type from the planner's args only if it occurs there (`_stated`), so a
+    test that supplies either must also supply the words.
+    """
     state = new_state(session_id="s1", user_id="u1", trace_id="t1")
     state["customer_id"] = "cust-uuid"
+    state["customer_ref"] = "CUST-1004"
+    state["messages"] = [HumanMessage(content=request)]
     state["plan"] = [
         PlanTask(
             id="1",
             workflow="claims",
-            action="retrieve_claims",
+            action=action,
             args=task_args or {},
             status=TaskStatus.RUNNING,
         )
@@ -489,3 +509,341 @@ def test_the_thresholds_in_code_are_the_thresholds_in_the_policy_text():
     assert f"exceeds {ESCALATION_LIMIT}" in policy
     assert f"Claims of {SECOND_REVIEW_LIMIT} or more require a second review" in policy
     assert f"Motor claims under {SECOND_REVIEW_LIMIT}" in policy
+
+    # The same check for what a new claim starts out waiting for.
+    assert (
+        "Motor and property claims are registered as awaiting information until an "
+        "incident report reference is recorded; travel claims open immediately."
+    ) in policy
+    needs_report = [t for t, docs in REQUIRED_DOCUMENTS.items() if "incident_report" in docs]
+    assert needs_report == ["motor", "property"]
+    assert REQUIRED_DOCUMENTS["travel"] == []
+
+
+# ------------------------------------------------------------ register_claim
+
+
+@pytest.fixture
+def registry(monkeypatch):
+    """Control the customer lookup and capture the INSERT.
+
+    `create_claim` returns the row as the database would: the reference minted
+    when none was given, the status derived from the documents outstanding, and
+    the owner joined in. `existing` is what `get_claim` finds for a reference the
+    handler supplied.
+    """
+    created: list[dict] = []
+
+    def _set(customer: dict | None, existing: dict | None = None) -> list[dict]:
+        async def fake_customer(_pool, ref):
+            return customer if customer and customer["external_ref"] == ref else None
+
+        async def fake_get(_pool, _claim_ref):
+            return existing
+
+        async def fake_create(_pool, **kw):
+            created.append(kw)
+            return {
+                "id": "new-uuid",
+                "claim_ref": kw["claim_ref"] or "CLM-9001",
+                "claim_type": kw["claim_type"],
+                "status": "awaiting_information" if kw["missing_fields"] else "open",
+                "amount": kw["amount"],
+                "incident_date": kw["incident_date"],
+                "missing_fields": kw["missing_fields"],
+                "customer_id": kw["customer_id"],
+                "customer_ref": "CUST-1004",
+                "customer_name": "Tom Baker",
+            }
+
+        monkeypatch.setattr(repository, "get_customer", fake_customer)
+        monkeypatch.setattr(repository, "get_claim", fake_get)
+        monkeypatch.setattr(repository, "create_claim", fake_create)
+        return created
+
+    return _set
+
+
+TOM = {"id": "tom-uuid", "external_ref": "CUST-1004", "full_name": "Tom Baker"}
+
+
+async def test_a_fully_stated_claim_is_registered_without_asking(graph, registry):
+    """The handler said everything: no pause, no extraction call, one INSERT."""
+    created = registry(TOM)
+    model = StubModel()
+    result = await graph.ainvoke(
+        make_state(
+            action="register_claim",
+            task_args={"customer_ref": "CUST-1004", "claim_ref": "clm-7007",
+                       "claim_type": "Property", "amount": "100,000",
+                       "incident_date": "2026-09-20"},
+            request="register clm-7007 for CUST-1004: property, 100,000, incident 2026-09-20",
+        ),
+        context=deps(model),
+    )
+
+    assert "__interrupt__" not in result
+    assert created == [{
+        "customer_id": "tom-uuid",
+        "claim_ref": "CLM-7007",
+        "claim_type": "property",
+        "amount": 100000.0,      # "100,000" read as a number, not rejected
+        "incident_date": "2026-09-20",
+        "missing_fields": ["incident_report"],
+    }]
+    ws = result["workflow_states"]["claims"]
+    assert ws["outcome"] == "registered"
+    assert result["plan"][0].status is TaskStatus.DONE
+    # The summary is written from the same facts as a looked-up claim, with the
+    # rule the amount triggers already decided in code.
+    prompt = model.calls[0]
+    assert "Registered this turn" in prompt and "CLM-7007" in prompt
+    assert "Escalate to the duty manager: the claim exceeds 10,000" in prompt
+    assert "Still missing: incident report" in prompt
+    assert not any("ClaimDetails" in c or "extract" in c for c in model.calls)
+
+
+async def test_register_falls_back_to_the_customer_in_focus(graph, registry):
+    """"Register a claim for them": no customer in args, one in shared state."""
+    created = registry(TOM)
+    await graph.ainvoke(
+        make_state(action="register_claim",
+                   task_args={"claim_type": "travel", "amount": 300,
+                              "incident_date": "2026-09-01"},
+                   request="log a travel claim for them, 300, incident 2026-09-01"),
+        context=deps(),
+    )
+    assert created[0]["customer_id"] == "cust-uuid"   # from make_state, not args
+    assert created[0]["missing_fields"] == []          # travel opens immediately
+
+
+async def test_register_with_no_customer_writes_nothing(graph, registry):
+    """A refusal with a reason, not a claim registered against nobody."""
+    created = registry(customer=None)
+    state = make_state(action="register_claim", task_args={"claim_type": "motor"})
+    state["customer_id"] = None
+    state["customer_ref"] = None
+
+    result = await graph.ainvoke(state, context=deps())
+
+    ws = result["workflow_states"]["claims"]
+    assert created == []
+    assert ws["outcome"] == "not_registered"
+    assert "CUST-" in ws["reason"]
+    # Written by the workflow, so compose passes it through with no model call.
+    assert ws["summary"].startswith("The claim was not registered: no customer")
+    assert result["plan"][0].status is TaskStatus.DONE
+
+
+async def test_register_refuses_a_reference_that_is_already_taken(graph, registry):
+    created = registry(TOM, existing=CLAIM_COMPLETE)
+    result = await graph.ainvoke(
+        make_state(action="register_claim",
+                   task_args={"claim_ref": "CLM-5001", "claim_type": "motor"},
+                   request="register a motor claim CLM-5001 for them"),
+        context=deps(),
+    )
+    ws = result["workflow_states"]["claims"]
+    assert created == []
+    assert ws["outcome"] == "not_registered"
+    assert "CLM-5001" in ws["reason"] and "Priya Raman" in ws["reason"]
+
+
+async def test_register_asks_for_what_is_missing_then_creates(registry):
+    """The live transcript this was built from: "CLM-7007 with cost 100,000".
+
+    The type was never stated, so the workflow asks — and asks only for what it
+    lacks. The reply is read into typed fields ("20 September" becomes a date),
+    and the claim is created with the type the handler wrote.
+    """
+    created = registry(TOM)
+    graph = build_claims_graph(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "register-ask"}}
+    model = StubModel(details={"claim_type": "property", "incident_date": "2026-09-20"})
+
+    first = await graph.ainvoke(
+        make_state(action="register_claim",
+                   task_args={"claim_ref": "CLM-7007", "amount": 100000},
+                   request="can we onboard new claim with number CLM-7007 with cost 100,000"),
+        config, context=deps(model),
+    )
+    asked = first["__interrupt__"][0].value
+    assert asked["kind"] == "need_info"
+    assert asked["fields"] == ["claim_type", "incident_date"]
+    assert "CLM-7007" in asked["question"] and "CUST-1004" in asked["question"]
+    assert created == [], "nothing may be written while the pause is open"
+
+    result = await graph.ainvoke(
+        Command(resume="It's a property claim, the incident was on 20 September 2026"),
+        config, context=deps(model),
+    )
+
+    assert created[0]["claim_type"] == "property"
+    assert created[0]["incident_date"] == "2026-09-20"   # "20 September" passed the guard
+    assert created[0]["amount"] == 100000.0
+    assert result["workflow_states"]["claims"]["outcome"] == "registered"
+    assert result["plan"][0].status is TaskStatus.DONE
+
+
+async def test_a_type_the_handler_did_not_write_is_discarded(registry):
+    """Same guard as the lookup pause: the model may not invent the claim type.
+
+    A wrongly typed claim is a wrong row in the system of record, so a type that
+    does not occur in the reply is dropped and the claim is honestly not
+    registered — rather than registered as whatever the model guessed.
+    """
+    created = registry(TOM)
+    graph = build_claims_graph(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "register-invent"}}
+    model = StubModel(details={"claim_type": "motor"})   # lies
+
+    await graph.ainvoke(
+        make_state(action="register_claim", task_args={"amount": 500}),
+        config, context=deps(model),
+    )
+    result = await graph.ainvoke(
+        Command(resume="not sure of the type yet, amount is right"),
+        config, context=deps(model),
+    )
+
+    ws = result["workflow_states"]["claims"]
+    assert created == []
+    assert ws["outcome"] == "not_registered"
+    assert "claim type" in ws["reason"]
+    assert "__interrupt__" not in result, "one ask, then decide"
+
+
+async def test_an_unknown_action_is_a_lookup(graph, db_returns):
+    """The planner improvises action names ("summarise_claim"). Only the exact
+    register action may reach the write path; everything else reads."""
+    db_returns([CLAIM_COMPLETE])
+    result = await graph.ainvoke(
+        make_state(action="summarise_claim", task_args={"claim_ref": "CLM-5001"}),
+        context=deps(),
+    )
+    assert result["workflow_states"]["claims"]["outcome"] == "summarised"
+
+
+async def test_retrieve_publishes_the_customer_in_focus(graph, db_returns):
+    """Only onboarding used to publish `customer_id`; a session that opened with
+    a claim lookup had no customer for "register one for them" to resolve."""
+    db_returns([{**CLAIM_COMPLETE, "customer_id": "priya-uuid"}])
+    state = make_state(task_args={"claim_ref": "CLM-5001"})
+    state["customer_id"] = None
+    state["customer_ref"] = None
+
+    result = await graph.ainvoke(state, context=deps())
+
+    assert result["customer_id"] == "priya-uuid"
+    assert result["customer_ref"] == "CUST-1001"
+
+
+async def test_a_reference_the_handler_did_not_type_is_minted_instead(graph, registry):
+    """Observed live: "log a travel claim for them" planned with `claim_ref:
+    CLM-5001` — the prompt's own example. A reference absent from the request
+    is dropped, and the database mints one, rather than the register being
+    refused because the example is someone's claim."""
+    created = registry(TOM, existing=CLAIM_COMPLETE)   # CLM-5001 IS taken
+    result = await graph.ainvoke(
+        make_state(action="register_claim",
+                   task_args={"claim_ref": "CLM-5001", "claim_type": "travel",
+                              "amount": 450, "incident_date": "2026-09-12"},
+                   request="log a travel claim for them for 450, incident on 12 Sep 2026"),
+        context=deps(),
+    )
+    assert created[0]["claim_ref"] is None
+    assert result["workflow_states"]["claims"]["outcome"] == "registered"
+
+
+async def test_a_type_the_handler_did_not_type_is_asked_for(graph, registry):
+    """Observed live: after summarising a property claim, a NEW claim was
+    planned as `property` — taken from the transcript, not the request."""
+    registry(TOM)
+    result = await graph.ainvoke(
+        make_state(action="register_claim",
+                   task_args={"claim_ref": "CLM-7007", "claim_type": "property",
+                              "amount": 100000},
+                   request="register CLM-7007 for them, 100,000"),
+        context=deps(),
+    )
+    assert result["__interrupt__"][0].value["fields"] == ["claim_type", "incident_date"]
+
+
+async def test_a_customer_named_by_name_is_looked_up(graph, db_returns, monkeypatch):
+    """"does Hiro Tanaka have open claims?" — the planner sends `customer_name`."""
+    db_returns([{**CLAIM_COMPLETE, "customer_id": "hiro-uuid", "customer_ref": "CUST-1008"}])
+    hiro = {"id": "hiro-uuid", "external_ref": "CUST-1008", "full_name": "Hiro Tanaka"}
+
+    async def fake_find(_pool, name):
+        return [hiro] if name.lower() in "hiro tanaka" else []
+
+    monkeypatch.setattr(repository, "find_customers", fake_find)
+    state = make_state(task_args={"customer_name": "Tanaka"})
+    state["customer_id"] = None
+
+    result = await graph.ainvoke(state, context=deps())
+
+    assert result["workflow_states"]["claims"]["outcome"] == "summarised"
+    assert result["customer_ref"] == "CUST-1008"
+
+
+async def test_an_unknown_or_ambiguous_customer_is_not_a_customer_with_no_claims(
+    graph, db_returns, monkeypatch
+):
+    """"No active claims were found" used to be the answer for a customer who
+    does not exist. Now the answer says so, verbatim from the workflow."""
+    db_returns([])
+    two = [{"id": "a", "external_ref": "CUST-1010", "full_name": "Ben Carter"},
+           {"id": "b", "external_ref": "CUST-1099", "full_name": "Ben Adeyemi"}]
+
+    async def fake_find(_pool, name):
+        return two if name == "Ben" else []
+
+    monkeypatch.setattr(repository, "find_customers", fake_find)
+
+    for name, expect in (("Ben", "more than one customer matches"),
+                         ("Nobody", "no customer called")):
+        state = make_state(task_args={"customer_name": name})
+        state["customer_id"] = None
+        result = await graph.ainvoke(state, context=deps())
+        ws = result["workflow_states"]["claims"]
+        assert ws["outcome"] == "not_found"
+        assert expect in ws["summary"], ws["summary"]
+        assert result["plan"][0].status is TaskStatus.DONE
+
+
+async def test_a_date_or_amount_the_handler_did_not_type_is_asked_for(graph, registry):
+    """Observed live: a new claim dated 1 Sep 2026 — the previous claim's date,
+    copied from the transcript. Digits and days are checked against the text."""
+    registry(TOM)
+    result = await graph.ainvoke(
+        make_state(action="register_claim",
+                   task_args={"claim_type": "motor", "amount": 12750,
+                              "incident_date": "2026-09-01"},
+                   request="register a motor claim for them"),
+        context=deps(),
+    )
+    assert result["__interrupt__"][0].value["fields"] == ["amount", "incident_date"]
+
+
+def test_stated_matches_the_ways_a_handler_writes_a_date_and_a_number():
+    from app.graph.workflows.claims.graph import _stated
+
+    for text in ("incident on 12 Sep 2026", "on 2026-09-12", "12/09/2026", "the 12th of September"):
+        assert _stated("incident_date", "2026-09-12", text), text
+    assert not _stated("incident_date", "2026-09-12", "yesterday")
+    assert not _stated("incident_date", "2026-09-01", "summarise CLM-5003, 100,000")
+
+    assert _stated("amount", 100000.0, "with cost 100,000")
+    assert _stated("amount", 1200.5, "$1,200.50 damage")
+    assert not _stated("amount", 12750.0, "register a claim for them")
+    assert _stated("claim_ref", "CLM-7007", "number clm-7007 please")
+    assert not _stated("claim_type", "property", "a new claim")
+
+
+def test_details_keep_what_validates_and_drop_the_rest():
+    """One bad value must not discard the good ones next to it."""
+    from app.graph.workflows.claims.graph import _details
+
+    details = _details({"claim_type": "car", "amount": "$1,200.50", "incident_date": "soon"})
+    assert details == ClaimDetails(amount=1200.5)

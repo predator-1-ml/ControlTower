@@ -78,7 +78,17 @@ entire mechanism:
 
 There is **no workflow-switch branch anywhere in the code**. Three channels carry
 the context between turns: `plan`, `workflow_states` (keyed per workflow, so each
-keeps its own scratch space) and `customer_id`.
+keeps its own scratch space) and the customer in focus — `customer_id` for the
+tools and `customer_ref` for the planner. Both onboarding and claims publish
+them: a session that opens with "summarise CLM-5003" has Tom Baker in focus from
+the claim's owner, so "register a new claim for them" resolves without a name.
+
+The planner is shown the conversation, both sides, fenced off from the request
+it must plan. It used to see human turns only, and a follow-up that leaned on
+the assistant's answer ("…for Tom Baker (CUST-1004)") was planned with no
+customer at all — the reference had been said by the side the planner could not
+read. The customer in focus is listed separately, from state, so a reply that
+names the customer only by name still resolves.
 
 Two details make that true rather than merely intended:
 
