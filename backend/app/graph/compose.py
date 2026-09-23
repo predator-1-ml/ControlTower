@@ -14,13 +14,16 @@ upstream (`next_actions` in the claims workflow, the onboarding routing rules).
 Re-opening one here is how a system starts confidently contradicting its own
 audit trail. "Next step:" lines arrive already written and are copied.
 
-**Text a workflow wrote is never paraphrased.** Knowledge's `answer` carries
-citations built from the retrieved chunks, not from the model; a second model
-pass can only damage them, and a damaged citation silently stops being a source
-chip in the UI. Claims' `summary` is a capability the assignment names in its own
-right. So when a workflow wrote operator-facing text this turn, that text is
-passed through verbatim — and when it was the turn's only task, this node makes
-**zero** model calls.
+**One answer per turn.** When a single workflow ran and wrote its own text — a
+claim summary, a knowledge answer — that text IS the answer and this node makes
+**zero** model calls. When more than one thing happened, the model writes one
+consolidated answer from every workflow's facts, ending in the next steps the
+workflows decided. Knowledge's `answer` alone is appended verbatim: its citations
+are built from the retrieved chunks, a second pass can only damage them, and a
+damaged citation silently stops being a source chip in the UI. The claim summary
+is NOT appended on a mixed turn — it is written from the same `claims_facts`
+lines the composer gets, and appending it produced two answers with two
+different next steps (the worked example, observed live).
 
 Partial success is the normal case, not an edge case: an operations request that
 half-succeeds is a Tuesday. The prompt says so explicitly, because a model given
@@ -42,19 +45,25 @@ from app.llm.provider import message_text
 
 SYSTEM_PROMPT = """You are writing to an insurance operations handler who asked the request below.
 
-Answer their request first, in the first sentence. Then the two to four facts that
-matter to them. If a "Next step" is given, end with a line starting "Next step:".
-If none is given, do not write one.
+Write ONE consolidated answer. Open with what was done and what was found, in one
+or two plain sentences. Then, only where they change what the handler does next,
+a few short "- " lines of facts. End with the "Next step:" lines you were given,
+each copied whole and unchanged.
 
 Rules:
-- Use only the facts given. Do not infer, soften, or add advice.
+- Never label lines ("Outcome:", "Facts:") and never restate the request.
+- Use only the facts given. Every line you write must come from a fact given;
+  if no fact adds anything to the opening sentences, write no list.
+- The only next steps that exist are the "Next step:" lines given. Never write
+  another. If none is given, end after the facts.
 - Refer to things the way the handler does: CLM- and CUST- references and names.
-- Copy amounts, dates and citations (which look like [document, section]) exactly
-  as given. Do not put square brackets around anything else.
-- A result marked "written below this answer" is complete. Mention it in one
-  clause at most, and never add a reference or a detail to it.
+- Copy amounts, dates and citations exactly as given. A citation looks like
+  [document, section] and appears only where a fact already carries one; never
+  add one, and never put square brackets around anything else.
+- If told that a policy answer follows your text, write nothing about policy or
+  rules: not a summary, not a paraphrase, not a next step drawn from it.
 - If something could not be completed, say so plainly. Never report only what worked.
-- Plain text. Short lines. "- " for a list. No headings, no preamble."""
+- Plain text. Short lines. No headings, no preamble."""
 
 #: Section headings for the fact block. Workflow names are internal; these are
 #: the words a handler uses, and they are the only place a workflow name appears
@@ -69,6 +78,25 @@ ONBOARDING_OUTCOMES = {
     "manual_review": "Sent to manual review",
     "rejected": "Rejected",
     "customer_not_found": "No such customer on file",
+}
+
+#: What the handler does next, per outcome — decided here, in code, like the
+#: claims workflow's `next_actions`. Before this, onboarding gave the model no
+#: next step and the prompt's "if none is given, do not write one" did not hold:
+#: observed live, "Next step: Review the details of claim CLM-5001 to determine
+#: the next steps for onboarding customer CUST-1001" — invented, and sitting
+#: above the claim summary's real next step, so the answer ended twice and
+#: disagreed with itself. The model can only copy a next step it was given, so
+#: every outcome now gives one. The manual-review line quotes the seeded policy.
+ONBOARDING_NEXT_STEP = {
+    "application_created": "Nothing further for the handler: the application is submitted.",
+    "manual_review": (
+        "Manual review by the onboarding team, who record the decision on the "
+        "application; the customer may not self-serve until then "
+        "[onboarding-policy.md, Manual review]"
+    ),
+    "rejected": "Tell the applicant the outcome and the reason.",
+    "customer_not_found": "Check the customer reference and try again.",
 }
 
 
@@ -176,6 +204,8 @@ def onboarding_facts(ws: dict[str, Any]) -> list[str]:
             f"Application: {application.get('product')}, status "
             f"{_words(application.get('status'))}"
         )
+    if str(outcome) in ONBOARDING_NEXT_STEP:
+        lines.append(f"Next step: {ONBOARDING_NEXT_STEP[str(outcome)]}")
     return lines
 
 
@@ -200,6 +230,19 @@ def _text_of(ws: dict[str, Any]) -> str | None:
     return ws.get("answer") or ws.get("summary")
 
 
+def _verbatim(ws: dict[str, Any]) -> str | None:
+    """Text that survives a model call on the same turn: knowledge's `answer`.
+
+    Its citations are built from the retrieved chunks, and a second model pass
+    can only damage them. Claims' `summary` is NOT in this set: it is written
+    from `claims_facts`, so when the model is called the same facts go into
+    the one consolidated answer instead — appending the summary under a
+    narrated block gave the handler two answers with two different next steps
+    (the worked example, observed live).
+    """
+    return ws.get("answer")
+
+
 def _done_workflows(state: ControlTowerState, turn: list[PlanTask]) -> list[str]:
     """Workflows that completed a task THIS turn, in plan order.
 
@@ -211,14 +254,21 @@ def _done_workflows(state: ControlTowerState, turn: list[PlanTask]) -> list[str]
     return list(dict.fromkeys(t.workflow for t in turn if t.status is TaskStatus.DONE))
 
 
-def written_texts(state: ControlTowerState) -> list[str]:
-    """Text the workflows wrote this turn, in plan order, to append verbatim."""
+def written_texts(state: ControlTowerState, *, narrated: bool = False) -> list[str]:
+    """Text the workflows wrote this turn, in plan order.
+
+    With no model call (`model_input` is None) every workflow wrote its own
+    text and those texts, joined, ARE the answer. After a model call only
+    knowledge's answer is appended (`_verbatim`); a claim summary was already
+    consolidated into the narrated answer from the same facts.
+    """
     slices = state.get("workflow_states", {})
     turn = _turn_tasks(state)
+    pick = _verbatim if narrated else _text_of
     return [
         text
         for workflow in _done_workflows(state, turn)
-        if (text := _text_of(slices.get(workflow, {})))
+        if (text := pick(slices.get(workflow, {})))
     ]
 
 
@@ -238,29 +288,47 @@ def _request(state: ControlTowerState) -> str:
 def model_input(state: ControlTowerState) -> str | None:
     """Everything the model is allowed to see — or None when it is not needed.
 
-    None means every workflow that ran this turn wrote its own operator-facing
-    text, so there is nothing left to narrate and no model call is made.
+    None means every workflow that ran wrote its own text (a claim summary, a
+    knowledge answer) and nothing failed: there is nothing to narrate, the texts
+    stand as they are, and no model call is made. Tried and reverted: calling
+    the model here anyway to "consolidate" a claim summary with a knowledge
+    answer — shown the policy question in the request, Nova Pro answered it
+    itself (a 4,820 claim "requires a second review") and invented next steps.
+
+    The model is called only when something has no written text: onboarding
+    always, claims when it found nothing, any failed task. Then it writes ONE
+    answer from every fact-bearing workflow — a claim summary is not appended
+    beside it but re-drawn from the same `claims_facts` — and knowledge's
+    answer alone is appended verbatim (`_verbatim`).
     """
     slices = state.get("workflow_states", {})
     turn = _turn_tasks(state)
+    done = _done_workflows(state, turn)
+
+    # Failed and skipped tasks become a plain line with the error. The workflow
+    # name survives here and nowhere else: "a claims task" is how a handler would
+    # say it, and without it a mixed turn cannot say WHICH half failed.
+    problems = [
+        f"- A {t.workflow} task {'was skipped' if t.status is TaskStatus.SKIPPED else 'failed'}"
+        f": {t.error or 'no reason recorded'}"
+        for t in turn
+        if t.status in (TaskStatus.FAILED, TaskStatus.SKIPPED)
+    ]
+
+    if not problems and all(_text_of(slices.get(w, {})) for w in done):
+        return None
 
     sections: list[str] = []
     written: list[str] = []
-    for workflow in _done_workflows(state, turn):
+    for workflow in done:
         ws = slices.get(workflow, {})
-        if _text_of(ws):
-            # One TRUE line for a workflow whose text follows verbatim, with the
-            # real reference. Observed live on "onboard CUST-1005 and log a
-            # travel claim": with this workflow absent from the facts, the
-            # model — told to use CLM- references, shown none — wrote "The
-            # claim reference number is CLM-20230912-1005-01"; told instead
-            # that the claim was "answered separately below", it reported the
-            # claim as pending. Shown the fact, it has nothing to invent and
-            # nothing to misread.
-            refs = ", ".join(c["claim_ref"] for c in ws.get("claims") or [] if c.get("claim_ref"))
+        if _verbatim(ws):
+            # The model must know the policy half of the request is covered,
+            # or it answers it itself. Said as what follows, not as a fact to
+            # report — as "Done" it was echoed back as a bullet.
             written.append(
-                TITLES[workflow] + "\n- Done" + (f": {refs}" if refs else "")
-                + ". The full result is written below this answer; do not repeat or add to it."
+                TITLES[workflow] + "\n- A policy answer follows your text. Write "
+                "nothing about policy or rules."
             )
             continue
         builder = FACTS.get(workflow)
@@ -272,24 +340,9 @@ def model_input(state: ControlTowerState) -> str | None:
                 TITLES[workflow] + "\n" + "\n".join(f"- {line}" for line in lines)
             )
 
-    # Failed and skipped tasks become a plain line with the error. The workflow
-    # name survives here and nowhere else: "a claims task" is how a handler would
-    # say it, and without it a mixed turn cannot say WHICH half failed.
-    problems = [
-        f"- A {t.workflow} task {'was skipped' if t.status is TaskStatus.SKIPPED else 'failed'}"
-        f": {t.error or 'no reason recorded'}"
-        for t in turn
-        if t.status in (TaskStatus.FAILED, TaskStatus.SKIPPED)
-    ]
     if problems:
         sections.append("Could not complete\n" + "\n".join(problems))
 
-    # Nothing to narrate means no model call — including a turn whose every
-    # workflow wrote its own text. Given only "Done" lines and the request,
-    # the model answered the request itself: observed live, "when does a motor
-    # claim need a second review, and do they have other claims?" produced an
-    # invented rule and "CUST-22914 has no other open claims" above the two
-    # correct texts.
     if not sections:
         return None
 
@@ -311,16 +364,15 @@ NOTHING_PLANNED = (
 
 async def compose_response(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[str, Any]:
     prompt = model_input(state)
-    written = written_texts(state)
 
     if not _turn_tasks(state):
         text = NOTHING_PLANNED
     elif prompt is None:
-        # The turn's only work was a workflow that writes its own text. Calling
-        # the model here would paraphrase an answer that is already correct, and
-        # the frontend would show it twice — streamed once from the workflow's
-        # node, then replaced by a worse version of itself.
-        text = "\n\n".join(written)
+        # Every workflow that ran wrote its own text. Calling the model here
+        # would paraphrase answers that are already correct, and the frontend
+        # would show them twice — streamed once from the workflow's node, then
+        # replaced by a worse version.
+        text = "\n\n".join(written_texts(state))
     else:
         # HumanMessage, NOT AIMessage. Putting the results in an assistant turn
         # makes the model read them as its own half-finished output and CONTINUE
@@ -330,7 +382,7 @@ async def compose_response(state: ControlTowerState, runtime: Runtime[Deps]) -> 
         response = await runtime.context.model.ainvoke(
             [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
         )
-        text = "\n\n".join([message_text(response), *written])
+        text = "\n\n".join([message_text(response), *written_texts(state, narrated=True)])
 
     return {
         "final_response": text,

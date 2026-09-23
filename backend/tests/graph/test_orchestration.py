@@ -22,7 +22,14 @@ from langgraph.types import Command
 from app.api.streaming import translate
 from app.db import repository
 from app.graph.build import RECURSION_LIMIT, build_graph
-from app.graph.compose import claims_facts, compose_response, model_input, written_texts
+from app.graph.compose import (
+    ONBOARDING_OUTCOMES,
+    claims_facts,
+    compose_response,
+    model_input,
+    onboarding_facts,
+    written_texts,
+)
 from app.graph.deps import Deps
 from app.graph.state import Plan, PlanTask, TaskStatus, new_state
 
@@ -419,9 +426,13 @@ async def test_a_mixed_turn_appends_the_written_text_verbatim():
 
 
 async def test_two_workflows_that_both_wrote_text_make_no_model_call():
-    """Given only "Done" lines and the request, the model answers the request
-    itself. Observed live: an invented second-review rule and a customer
-    reference that does not exist, above the two correct texts."""
+    """Both texts stand as they are: a claim summary beside a cited answer.
+
+    Tried and reverted: calling the model to consolidate these. Shown the
+    policy question in the request, Nova Pro answered it itself — a 4,820
+    claim "requires a second review" — and invented next steps above the two
+    correct texts.
+    """
     answer = "Motor claims of 5000 or more need a second review [claims-handling-policy.md, Motor]."
     state = composable(
         knowledge={"outcome": "answered", "answer": answer},
@@ -436,22 +447,61 @@ async def test_two_workflows_that_both_wrote_text_make_no_model_call():
     assert result["final_response"] == answer + "\n\nClaim CLM-9022 is open."
 
 
-def test_a_mixed_turn_names_what_is_reported_separately():
-    """The model is told which half of the request its text must not answer.
+async def test_onboarding_and_a_claim_become_one_answer():
+    """The worked example, as the handler saw it live: a narrated block ending
+    in an invented next step, then the claim summary with a different one.
 
-    Observed live: "onboard CUST-1005 and log a travel claim" — the claim's
-    summary was appended verbatim, the fact block held only onboarding, and the
-    model invented a claim reference for the half it was not shown.
+    Onboarding has no text of its own, so the model is called — and given the
+    claim's FACTS, next step included, rather than having the summary appended
+    under its answer. One answer, every next step given, none invented.
     """
     state = composable(
-        onboarding={"outcome": "application_created"},
-        claims={"outcome": "registered", "summary": "Claim CLM-9012 registered.",
-                "claims": [{"claim_ref": "CLM-9012"}]},
+        onboarding={"outcome": "manual_review",
+                    "customer": {"full_name": "Priya Raman", "external_ref": "CUST-1001"},
+                    "review_reason": "existing active claim(s): CLM-5001"},
+        claims={"outcome": "summarised", "summary": "CLM-5001 is open; assess it.",
+                "claims": [{"claim_ref": "CLM-5001", "claim_type": "motor",
+                            "status": "open", "amount": 4820.0}],
+                "next_actions": {"CLM-5001": ["Proceed with standard assessment."]}},
     )
     prompt = model_input(state)
-    # The real reference, as one done line — not the summary, which follows verbatim.
-    assert "Claims\n- Done: CLM-9012. The full result is written below this answer" in prompt
-    assert "Claim CLM-9012 registered." not in prompt
+    assert "Claim CLM-5001: motor claim" in prompt
+    assert "Next step: Proceed with standard assessment." in prompt
+    assert "Next step: Manual review by the onboarding team" in prompt
+    assert "CLM-5001 is open; assess it." not in prompt
+
+    model = StubModel(reply="One answer.")
+    result = await compose_response(state, Runtime(context=deps(model)))
+    assert model.calls == 1
+    assert result["final_response"] == "One answer.", "the summary is not appended"
+
+
+async def test_a_policy_answer_is_flagged_and_appended_when_something_else_needs_narrating():
+    state = composable(
+        onboarding={"outcome": "application_created"},
+        knowledge={"outcome": "answered", "answer": "Rule [doc, sec]."},
+    )
+    prompt = model_input(state)
+    assert "Knowledge\n- A policy answer follows your text." in prompt
+    assert "Rule [doc, sec]." not in prompt
+
+    result = await compose_response(state, Runtime(context=deps(StubModel(reply="Onboarded."))))
+    assert result["final_response"] == "Onboarded.\n\nRule [doc, sec]."
+
+
+def test_every_onboarding_outcome_gives_the_model_a_next_step():
+    """The model can only copy a next step it was given.
+
+    Observed live on the worked example: onboarding gave none, and the model
+    wrote "Next step: Review the details of claim CLM-5001 to determine the
+    next steps for onboarding" — invented, above the claim's real next step.
+    """
+    for outcome in ONBOARDING_OUTCOMES:
+        facts = onboarding_facts({"outcome": outcome})
+        assert facts[-1].startswith("Next step: "), outcome
+    assert "[onboarding-policy.md, Manual review]" in onboarding_facts(
+        {"outcome": "manual_review"}
+    )[-1]
 
 
 # ------------------------------------------------------------- the step trail
