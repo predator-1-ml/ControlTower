@@ -214,6 +214,14 @@ module "frontend" {
   environment = {
     NODE_ENV = "production"
 
+    # Fargate injects HOSTNAME=<task hostname> into every container, and that
+    # wins over the image's ENV HOSTNAME=0.0.0.0. Next's standalone server binds to
+    # HOSTNAME, so on ECS it listened only on the task IP: the ALB (which targets
+    # that IP) saw a healthy service while the container health check on
+    # 127.0.0.1 got ECONNREFUSED, and ECS replaced every task after 30s + 3
+    # failures. Reproduced locally with `docker run -e HOSTNAME=ip-10-0-11-152`.
+    HOSTNAME = "0.0.0.0"
+
     # Node closes idle keep-alive connections after 5s by default; the public ALB
     # holds them for 300s. The ALB then reuses a socket Node has already closed
     # and the browser gets an intermittent 502. Must exceed the ALB idle timeout —

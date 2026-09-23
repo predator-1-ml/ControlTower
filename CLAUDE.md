@@ -237,6 +237,14 @@ returns `None`, which looks like "pgvector unavailable" but means "no such key".
 The pgvector version can only be confirmed from a running instance:
 `SELECT * FROM pg_available_extensions WHERE name = 'vector';`
 
+**Fargate overrides the image's `HOSTNAME`.** Every container gets `HOSTNAME=<task
+hostname>` from the runtime, and it beats a Dockerfile `ENV HOSTNAME=0.0.0.0`.
+Next's standalone server binds to `HOSTNAME`, so on ECS the frontend listened
+only on its task IP: the ALB was happy, the container health check on
+`127.0.0.1` got `ECONNREFUSED`, and ECS replaced every task. The task definition
+sets `HOSTNAME=0.0.0.0` explicitly. Locally the image is fine, which is why it
+passed every compose run.
+
 **Nothing loop-bound may be built at import time.** `AsyncPostgresSaver.__init__`
 captures the running loop, so the graph is compiled in the FastAPI lifespan.
 There is no importable module-level `graph`; handlers read `request.app.state.graph`.
