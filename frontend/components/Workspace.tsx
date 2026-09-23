@@ -78,6 +78,19 @@ function toSignIn() {
  * event stream, and threading it through a store would add indirection without
  * removing any coupling.
  */
+// `crypto.randomUUID()` exists only in a SECURE context (https, or localhost).
+// The demo ALB is plain http, so on the deployed site it is undefined and the
+// first render threw "crypto.randomUUID is not a function": the workspace
+// showed "This page couldn't load" straight after a successful sign-in.
+// localhost counts as secure, which is why no local run ever showed it.
+// `getRandomValues` has no such restriction. The id only has to be unique per
+// tab; it is an opaque checkpointer thread_id, not a UUID anyone parses.
+function newSessionId(): string {
+  if (typeof crypto.randomUUID === "function") return `ui-${crypto.randomUUID()}`;
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return `ui-${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
+}
+
 export function Workspace({ operator }: { operator: string }) {
   // Stable for the tab's lifetime. This is the checkpointer's thread_id, so it
   // is also what makes a workflow resumable — including after the backend has
@@ -269,7 +282,7 @@ export function Workspace({ operator }: { operator: string }) {
   // rejects that with a 409).
   useEffect(() => {
     const stored = sessionStorage.getItem(SESSION_KEY);
-    const id = stored ?? `ui-${crypto.randomUUID()}`;
+    const id = stored ?? newSessionId();
     sessionStorage.setItem(SESSION_KEY, id);
     setSessionId(id);
 
@@ -287,7 +300,7 @@ export function Workspace({ operator }: { operator: string }) {
 
   const newSession = useCallback(() => {
     restoreRun.current++;
-    const id = `ui-${crypto.randomUUID()}`;
+    const id = newSessionId();
     sessionStorage.setItem(SESSION_KEY, id);
     setSessionId(id);
     setMessages([]);
