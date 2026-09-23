@@ -141,4 +141,6 @@ cd terraform/environments/dev && terraform init -backend=false && terraform vali
 ```
 
 CI enforces both, and `plan` runs with `-detailed-exitcode` so a failure to
-produce a plan is distinguishable from a plan with no changes.
+produce a plan is distinguishable from a plan with no changes. That only works
+with `terraform_wrapper: false` on `hashicorp/setup-terraform`: the default
+wrapper always exits 0, and the apply job would be skipped for every change.
