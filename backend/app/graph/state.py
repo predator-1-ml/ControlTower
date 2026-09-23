@@ -178,7 +178,14 @@ class ControlTowerState(TypedDict):
     trace_id: str     # one id correlating API -> graph -> node -> tool -> audit row
 
     # --- business context ---------------------------------------------------
+    # The customer this session is about, in the two forms the two readers need.
+    # `customer_id` is the row key the tools query with; `customer_ref` is the
+    # reference a handler types (CUST-1004) and the one the planner is shown, so
+    # "register a claim for them" can be resolved to a customer without the
+    # model ever seeing a UUID. Either workflow that identifies a customer
+    # publishes both; the planner reads the ref, the workflows read the id.
     customer_id: str | None
+    customer_ref: str | None
     current_intent: str | None
 
     # --- orchestration ------------------------------------------------------
@@ -227,6 +234,7 @@ def new_state(session_id: str, user_id: str, trace_id: str) -> ControlTowerState
         user_id=user_id,
         trace_id=trace_id,
         customer_id=None,
+        customer_ref=None,
         current_intent=None,
         plan=[],
         turn_task_ids=[],

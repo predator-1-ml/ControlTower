@@ -36,16 +36,53 @@ async def get_customer(pool: AsyncConnectionPool, external_ref: str) -> dict[str
     return _serialise(row)
 
 
+#: One row shape for every claim query. The owner's reference and name ride on
+#: each row so a claim reached by any path — by reference, by customer, or just
+#: registered — carries who it belongs to. Before this only `get_claim` joined
+#: the customer, so the Session card could name the customer after "summarise
+#: CLM-5003" but not after "any claims for CUST-1002?", and the claims workflow
+#: could publish the customer in focus on one path but not the other.
+_CLAIM_COLUMNS = """
+    c.id::text, c.claim_ref, c.claim_type, c.status, c.amount,
+    c.incident_date, c.missing_fields, c.customer_id::text,
+    cu.external_ref AS customer_ref, cu.full_name AS customer_name
+"""
+
+
+async def find_customers(pool: AsyncConnectionPool, name: str) -> list[dict[str, Any]]:
+    """Customers whose name contains `name`, for a handler who typed a name.
+
+    Substring and case-insensitive, because "Tanaka" and "hiro tanaka" are both
+    how a handler refers to Hiro Tanaka. Capped: the caller can act on exactly
+    one match and only needs to know whether there were more. No index — at this
+    scale a sequential scan over `customers` is microseconds, and a trigram index
+    is a thing to explain that nothing here would measurably use.
+    """
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            """
+            SELECT id::text, external_ref, full_name, email, date_of_birth, kyc_status
+            FROM customers
+            WHERE full_name ILIKE '%%' || %s || '%%'
+            ORDER BY external_ref
+            LIMIT 5
+            """,
+            (name.strip(),),
+        )
+        rows = await cur.fetchall()
+    return [_serialise(r) for r in rows]
+
+
 async def get_active_claims(pool: AsyncConnectionPool, customer_id: str) -> list[dict[str, Any]]:
     """Claims still requiring action. The assignment's worked example needs this."""
     async with pool.connection() as conn:
         cur = await conn.execute(
-            """
-            SELECT id::text, claim_ref, claim_type, status, amount,
-                   incident_date, missing_fields
-            FROM claims
-            WHERE customer_id = %s AND status = ANY(%s)
-            ORDER BY created_at DESC
+            f"""
+            SELECT {_CLAIM_COLUMNS}
+            FROM claims c
+            JOIN customers cu ON cu.id = c.customer_id
+            WHERE c.customer_id = %s AND c.status = ANY(%s)
+            ORDER BY c.created_at DESC
             """,
             (customer_id, list(ACTIVE_CLAIM_STATUSES)),
         )
@@ -56,15 +93,77 @@ async def get_active_claims(pool: AsyncConnectionPool, customer_id: str) -> list
 async def get_claim(pool: AsyncConnectionPool, claim_ref: str) -> dict[str, Any] | None:
     async with pool.connection() as conn:
         cur = await conn.execute(
-            """
-            SELECT c.id::text, c.claim_ref, c.claim_type, c.status, c.amount,
-                   c.incident_date, c.missing_fields,
-                   cu.external_ref AS customer_ref, cu.full_name AS customer_name
+            f"""
+            SELECT {_CLAIM_COLUMNS}
             FROM claims c
             JOIN customers cu ON cu.id = c.customer_id
             WHERE c.claim_ref = %s
             """,
             (claim_ref,),
+        )
+        row = await cur.fetchone()
+    return _serialise(row)
+
+
+async def create_claim(
+    pool: AsyncConnectionPool,
+    *,
+    customer_id: str,
+    claim_ref: str | None,
+    claim_type: str,
+    amount: float | None,
+    incident_date: str | None,
+    missing_fields: list[str],
+) -> dict[str, Any] | None:
+    """Register a claim. Returns the row, or None if the reference was already taken.
+
+    **`ON CONFLICT DO NOTHING`, and it is the idempotency mechanism.** A process
+    death between this INSERT and the checkpoint re-runs the node on resume;
+    a plain INSERT would then raise `UniqueViolation` on the reference it created
+    a moment ago, and the task would fail after the row exists. A no-op conflict
+    returns no row, and the caller reads the existing claim back instead.
+
+    `RETURNING` only fires for the row actually inserted, so None is
+    unambiguous: the reference existed before this statement ran. Whether that
+    is a handler reusing a live reference or the crash replay above is for the
+    caller to tell apart — it checked for the reference before asking.
+
+    A missing reference is minted from `claim_ref_seq` (migration 0003), in the
+    same statement, so two backend tasks registering at once cannot pick the same
+    number: the sequence is the only thing that is guaranteed unique across
+    processes.
+
+    Status is a rule, not a choice: a claim short of a required document starts
+    `awaiting_information`, which is the same status the pause in the claims
+    workflow reads, so a later "summarise CLM-9001" chases exactly those documents.
+    """
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            f"""
+            WITH inserted AS (
+                INSERT INTO claims
+                    (claim_ref, customer_id, claim_type, status, amount, incident_date,
+                     missing_fields)
+                VALUES (COALESCE(%s, 'CLM-' || nextval('claim_ref_seq')), %s, %s,
+                        CASE WHEN %s::jsonb = '[]'::jsonb THEN 'open'
+                             ELSE 'awaiting_information' END,
+                        %s, %s::date, %s::jsonb)
+                ON CONFLICT (claim_ref) DO NOTHING
+                RETURNING *
+            )
+            SELECT {_CLAIM_COLUMNS}
+            FROM inserted c
+            JOIN customers cu ON cu.id = c.customer_id
+            """,
+            (
+                claim_ref,
+                customer_id,
+                claim_type,
+                json.dumps(missing_fields),
+                amount,
+                incident_date,
+                json.dumps(missing_fields),
+            ),
         )
         row = await cur.fetchone()
     return _serialise(row)

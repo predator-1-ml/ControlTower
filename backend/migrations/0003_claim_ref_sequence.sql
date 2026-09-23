@@ -1,0 +1,17 @@
+-- References for claims registered through the control tower.
+--
+-- A handler registering a claim at first notice often has no reference yet —
+-- the reference is something the system of record assigns. A sequence is the
+-- only generator that is unique across two backend tasks inserting at the same
+-- moment without a retry loop; `max(claim_ref) + 1` reads-then-writes and races,
+-- and a random suffix is not something a handler can read out over the phone.
+--
+-- Starts at 9001 so minted references cannot collide with the seeded block
+-- (CLM-5001 onwards) or with references a handler types by hand in a demo
+-- (CLM-7007). The prefix is applied at insert time, not stored here, so the
+-- sequence stays a plain integer.
+--
+-- No CHECK on claim_type: the values are validated in code (`ClaimDetails` in
+-- the claims workflow), where the accepted list is also the one the model is
+-- offered. Repeating it here would be a second list to keep in step.
+CREATE SEQUENCE claim_ref_seq START WITH 9001;

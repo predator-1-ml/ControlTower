@@ -161,6 +161,22 @@ Onboarding's pauses deliberately keep the old behaviour: they record what was
 typed and move on. Every decision that workflow makes has legal weight, so it has
 no LLM anywhere, and adding one to read a date of birth would be the first.
 
+### Registering a claim is a second pause, not the same one
+**Gained:** the register path (`prepare → ask_details → read_details → create`)
+has the same three-node shape as the lookup pause, so the reasons are the same
+and explained once — `interrupt()` first, the reply checkpointed before the
+model reads it, the write in its own node. Its reply is read into *typed* fields
+(`ClaimDetails`: a `Literal` type, a `float`, a `date`), so "20 September" lands
+as a column value and "car" cannot become a claim type.
+**Cost:** two pauses that look alike. Folding them into one node parameterised
+by what it asks was rejected because the two replies are read into different
+shapes — named references versus typed facts — and one node would have to
+explain both. The anti-invention guard also covers less here: the claim type is
+a word the handler wrote or did not, and is checked; the amount and the date are
+normalised by the model, which is why it is asked, so they cannot be matched
+against the text. A wrong amount is a wrong number on a row a handler will read
+back; a wrong type is a wrong row. The guard sits on the second.
+
 ### In-process session concurrency guard
 **Gained:** two concurrent turns on one session cannot race the checkpointer,
 today.

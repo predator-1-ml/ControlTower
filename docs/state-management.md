@@ -64,7 +64,8 @@ class ControlTowerState(TypedDict):
     session_id: str          # also the checkpointer thread_id
     user_id: str
     trace_id: str            # correlates API → graph → node → tool → audit row
-    customer_id: str | None
+    customer_id: str | None   # the row key the tools query with
+    customer_ref: str | None  # the CUST- reference the planner is shown
     current_intent: str | None
     plan: Annotated[list[PlanTask], merge_tasks]
     active_workflow: WorkflowName | None

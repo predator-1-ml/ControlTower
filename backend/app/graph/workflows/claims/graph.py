@@ -1,13 +1,29 @@
 """Claims Operations workflow.
 
+    retrieve_claims:
     retrieve ─▶ not_found                                        (no such claim)
              ─▶ validate ─▶ assess ─▶ summarise                  (nothing missing)
                          ─▶ request_information ─▶ read_reply ─┬─▶ request_information
                                                                └─▶ record_information
                                                                         ─▶ assess ─▶ summarise
+    register_claim:
+    prepare ─▶ not_registered                    (no customer, or the reference is taken)
+            ─▶ create ─▶ assess ─▶ summarise     (type, amount and date all stated)
+            ─▶ ask_details ─▶ read_details ─┬─▶ create ─▶ assess ─▶ summarise
+                                            └─▶ not_registered   (type still unknown)
+
+Two actions, one graph. Registering a claim is the other half of claims work —
+first notice of loss — and it shares the assessment and the summary with lookup,
+so a claim registered here is reported exactly as it would be if looked up a
+minute later. The pause is the same shape as the lookup pause (ask, read, write
+in three nodes, for the reasons given at `request_information`), but it is a
+separate pause: it asks for the claim's *facts*, before there is a row to attach
+documents to. Rejected: one generic pause node parameterised by what it asks —
+the two replies are read into different shapes (named references vs. typed
+fields), and folding them would make one node explain both.
 
 This is the tool/API-driven workflow of the three: database work and branching,
-with the model used at exactly the two points where the ambiguity is — reading a
+with the model used at exactly the points where the ambiguity is — reading a
 human's free text, and writing the summary. Everything between them is code:
 
 > **The LLM does language. Code makes decisions.**
@@ -26,13 +42,15 @@ words**, one node writes it, and a claim that is still incomplete says so.
 
 from __future__ import annotations
 
+import re
+from datetime import date
 from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from app.db import repository
 from app.graph.compose import claims_facts
@@ -55,14 +73,26 @@ ESCALATION_LIMIT = 10000        # operations-runbook.md, Escalation
 SECOND_REVIEW_LIMIT = 5000      # claims-handling-policy.md, Motor claims
 CLOSED_STATUSES = ("settled", "rejected")
 
+#: What a newly registered claim is still waiting for, by type — also quoted
+#: from the seeded policy ("Registering a claim"), and checked against it by the
+#: same test as the thresholds. A claim with an entry here starts
+#: `awaiting_information`, which is the status the lookup pause chases, so
+#: "summarise CLM-9001" the next day asks for exactly this document.
+REQUIRED_DOCUMENTS: dict[str, list[str]] = {
+    "motor": ["incident_report"],
+    "property": ["incident_report"],
+    "travel": [],
+}
+
 SUMMARY_PROMPT = """You are summarising claim work for an insurance operations handler.
 
 {facts}
 
 Write two or three sentences: what the claim is, where it stands, and what happens
 next. Rules:
-- Use only the facts above. Copy references, amounts, dates and anything in
-  [square brackets] exactly as given.
+- Use only the facts above. Copy references, amounts, dates and citations (which
+  look like [document, section]) exactly as given. Do not put square brackets
+  around anything else.
 - The next step has already been decided. Phrase it; never choose one.
 - Plain text. No headings, no preamble."""
 
@@ -93,6 +123,37 @@ class Reply(BaseModel):
     """
 
     supplied: list[Supplied] = Field(default_factory=list)
+
+
+class ClaimDetails(BaseModel):
+    """The facts a claim is registered with. Read from the planner's args AND
+    from the operator's reply, through the same validation, so a value is typed
+    once whichever way it arrived.
+
+    A fixed schema, unlike `Reply`: these three fields are the same for every
+    claim, and typing them is the point — `Literal` is what stops "car" being
+    stored as a claim type, and `date` is what turns "20 Sep 2026" into a column
+    value. Only `claim_type` is mandatory to register (NOT NULL, and the handling
+    rules key on it); an amount or a date unknown at first notice is normal.
+
+    Never enters state as a model: `model_dump(mode="json")` makes the date a
+    string, so nothing here needs `ALLOWED_MSGPACK_MODULES` either.
+    """
+
+    claim_type: Literal["motor", "property", "travel"] | None = Field(
+        None, description="The kind of claim, if the handler stated it."
+    )
+    amount: float | None = Field(None, ge=0, description="Amount claimed, as a number.")
+    incident_date: date | None = Field(None, description="When the incident happened.")
+
+
+READ_DETAILS_PROMPT = """You read an insurance handler's reply and extract the claim details in it.
+
+They were asked for: {fields}
+
+Fill in ONLY what the reply states. Claim type is one of motor, property or
+travel. Write amounts as plain numbers and dates as YYYY-MM-DD. Leave anything
+the reply does not give empty. Never guess."""
 
 
 def next_actions(claim: dict[str, Any]) -> list[str]:
@@ -160,6 +221,95 @@ def _merge_claims_state(state: ControlTowerState, **changes: Any) -> dict[str, A
     return all_states
 
 
+async def _named_customer(
+    state: ControlTowerState, args: dict[str, Any], pool: Any
+) -> tuple[dict[str, Any] | None, str | None]:
+    """The customer a task is about, and why there is none if there is none.
+
+    Three sources, in order. A reference the handler typed (`customer_ref`,
+    CUST-1001) wins. A name they typed (`customer_name`) is looked up and must
+    match exactly one customer — "Ben" matching two is a question for the
+    handler, not a coin toss. The customer in focus is the fallback: what an
+    earlier task published, and it must not win over a customer named
+    explicitly. Both `retrieve` and `prepare` resolve a customer this way, so the
+    rule is written once.
+
+    The second value is the problem to report when nothing resolved — a
+    reference or name that matched nothing is a different answer from "this
+    customer has no claims", and used to be reported as the latter.
+
+    The fallback carries no name — the reference and id are what the workflows
+    and the planner use, and the claim row supplies the name once one exists.
+    """
+    ref = args.get("customer_ref")
+    if ref:
+        customer = await repository.get_customer(pool, ref)
+        return customer, None if customer else f"no customer {ref} was found."
+    name = str(args.get("customer_name") or "").strip()
+    if name:
+        matches = await repository.find_customers(pool, name)
+        if len(matches) == 1:
+            return matches[0], None
+        if not matches:
+            return None, f"no customer called {name!r} was found."
+        refs = ", ".join(f"{m['external_ref']} {m['full_name']}" for m in matches)
+        return None, f"more than one customer matches {name!r}: {refs}. Use the reference."
+    if state.get("customer_id"):
+        return {"id": state["customer_id"], "external_ref": state.get("customer_ref")}, None
+    return None, "no customer was identified. Name the customer (CUST-…) the claim is for."
+
+
+MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+
+
+def _stated(name: str, value: Any, text: str) -> bool:
+    """Did the handler actually type this value into `text`?
+
+    The planner's args and the extracted reply are both model output, and a
+    model fills gaps from whatever it was shown. Observed live, all three: "log a
+    travel claim for them" planned with `claim_ref: CLM-5001` (the prompt's own
+    example); a new claim typed `property` from the transcript's previous claim;
+    a new claim dated 1 Sep 2026, the previous claim's incident date. The rule
+    is the reply guard's: a value the handler did not write is not theirs, and
+    is dropped — a dropped reference is minted, anything else is asked for.
+
+    A reference or a type is matched as written. A number is matched by its
+    digits, separators removed, so "100,000" and 100000 agree. A date is
+    normalised by the model (that is what it is asked for), so the ISO form
+    cannot be matched; instead its day must appear as a number in the text, and
+    so must its month or its year — "12 Sep 2026", "2026-09-12", "12/09/2026"
+    and "12th September" all pass, "yesterday" does not and is asked for.
+    """
+    if value in (None, ""):
+        return False
+    haystack = _normalise(text)
+    if name == "amount":
+        digits = re.sub(r"[^\d.]", "", haystack)
+        try:
+            return str(int(float(value))) in digits
+        except (TypeError, ValueError):
+            return False
+    if name == "incident_date":
+        try:
+            d = date.fromisoformat(str(value))
+        except ValueError:
+            return False
+        day = re.search(rf"(?<!\d)0?{d.day}(?!\d)", haystack) is not None
+        month_or_year = str(d.year) in haystack or (
+            MONTHS[d.month - 1] in haystack or re.search(rf"(?<!\d)0?{d.month}(?!\d)", haystack)
+        )
+        return day and bool(month_or_year)
+    return _normalise(str(value)) in haystack
+
+
+def _request(state: ControlTowerState) -> str:
+    """The operator's latest request, for `_stated`."""
+    for message in reversed(state.get("messages", [])):
+        if isinstance(message, HumanMessage):
+            return str(message.content)
+    return ""
+
+
 async def retrieve(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[str, Any]:
     """Load the claim named by the task, or the customer's active claims."""
     task = running_task(state["plan"], WORKFLOW)
@@ -168,19 +318,15 @@ async def retrieve(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[str
 
     pool = runtime.context.pool
     claim_ref = task.args.get("claim_ref")
+    customer, problem = None, None
 
     if claim_ref:
         claim = await repository.get_claim(pool, claim_ref)
         claims = [claim] if claim else []
+        problem = None if claim else f"no claim {claim_ref} was found."
     else:
-        # The planner is told to put `customer_ref` (CUST-1001) in args, so a
-        # standalone "does CUST-1001 have a claim?" names the customer there.
-        # Shared `customer_id` is the fallback: it is what an earlier onboarding
-        # task published, and it must not win over a customer named explicitly.
-        customer_ref = task.args.get("customer_ref")
-        customer = await repository.get_customer(pool, customer_ref) if customer_ref else None
-        customer_id = customer["id"] if customer else state.get("customer_id")
-        claims = await repository.get_active_claims(pool, customer_id) if customer_id else []
+        customer, problem = await _named_customer(state, task.args, pool)
+        claims = await repository.get_active_claims(pool, customer["id"]) if customer else []
 
     await repository.record_audit_event(
         pool,
@@ -197,7 +343,10 @@ async def retrieve(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[str
         # outlives the turn, so a second claims task in one session would
         # otherwise inherit the first one's `summary` and `outcome`, and compose
         # would report both. Other workflows' slices are carried over untouched.
-        "workflow_states": {**state.get("workflow_states", {}), WORKFLOW: {"claims": claims}},
+        "workflow_states": {
+            **state.get("workflow_states", {}),
+            WORKFLOW: {"claims": claims, "problem": problem},
+        },
         "tool_results": [
             {
                 "task_id": task.id,
@@ -207,7 +356,31 @@ async def retrieve(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[str
                 "latency_ms": 0,
             }
         ],
+        **_customer_in_focus(claims, customer),
     }
+
+
+def _customer_in_focus(
+    claims: list[dict[str, Any]], customer: dict[str, Any] | None
+) -> dict[str, Any]:
+    """The shared-state update that names who this claims task was about.
+
+    Onboarding has always published `customer_id`; this workflow did not, so a
+    session that opened with "summarise CLM-5003" had no customer in focus and
+    "register a claim for them" could not be resolved. The claim's owner is
+    taken from the row (every claim query joins the customer); a customer named
+    with no active claims is still the customer in focus.
+
+    Only known values are written. A channel with no reducer is overwritten by
+    whatever a node returns, so `{"customer_id": None}` here would erase the
+    customer an earlier onboarding task published.
+    """
+    if claims and claims[0].get("customer_id"):
+        owner = claims[0]
+        return {"customer_id": owner["customer_id"], "customer_ref": owner.get("customer_ref")}
+    if customer:
+        return {"customer_id": customer["id"], "customer_ref": customer["external_ref"]}
+    return {}
 
 
 def route_after_retrieve(state: ControlTowerState) -> Literal["validate", "not_found"]:
@@ -220,14 +393,292 @@ async def not_found(state: ControlTowerState) -> dict[str, Any]:
     'This customer has no active claims' is a correct, useful answer to the
     assignment's worked example. Modelling it as a failure would make the plan
     look broken whenever the true answer is 'nothing here'.
+
+    Two outcomes, though. A customer (or claim) that does not exist is not a
+    customer with no claims, and "does Hiro Tanka have open claims?" used to get
+    "no active claims were found" — true of nobody. When `retrieve` recorded a
+    problem, it is written as the slice's `summary` so compose passes it through
+    verbatim, and the outcome says what happened.
     """
     task = running_task(state["plan"], WORKFLOW)
     if task is None:
         return {}
+    problem = _claims_state(state).get("problem")
+    if problem:
+        return {
+            "plan": task_delta(task, status=TaskStatus.DONE, result_ref="not_found"),
+            "workflow_states": _merge_claims_state(
+                state, outcome="not_found", summary=f"Nothing to report: {problem}"
+            ),
+        }
     return {
         "plan": task_delta(task, status=TaskStatus.DONE, result_ref="no_claims"),
         "workflow_states": _merge_claims_state(state, outcome="no_claims"),
     }
+
+
+# ------------------------------------------------------------ register_claim
+
+
+def _details(values: dict[str, Any]) -> ClaimDetails:
+    """Read supplied values into `ClaimDetails`, keeping each one that validates.
+
+    Field by field, not the whole model at once: the planner writes "100,000" for
+    an amount often enough, and one bad value must not throw away a good type and
+    date alongside it. A value that does not validate is simply not supplied,
+    which the caller then asks for — the honest reading of a number it cannot
+    parse.
+    """
+    kept: dict[str, Any] = {}
+    for name in ClaimDetails.model_fields:
+        value = values.get(name)
+        if value in (None, ""):
+            continue
+        if name == "amount":
+            value = re.sub(r"[^\d.]", "", str(value))  # "100,000" / "$1,200.50"
+        if name == "claim_type":
+            value = str(value).strip().lower()
+        try:
+            kept[name] = getattr(ClaimDetails.model_validate({name: value}), name)
+        except ValidationError:
+            pass
+    return ClaimDetails(**kept)
+
+
+def _needed(draft: dict[str, Any]) -> list[str]:
+    return [name for name in ClaimDetails.model_fields if draft.get(name) is None]
+
+
+async def prepare(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[str, Any]:
+    """Resolve who the claim is for and what is already known about it.
+
+    No write, no model: this node decides whether registration can proceed,
+    and every reason it cannot is a fact a handler can check — no customer
+    identified, or a reference that is already someone's claim. `reason` set
+    here routes to `not_registered`; otherwise `needed` says whether to ask first.
+    """
+    task = running_task(state["plan"], WORKFLOW)
+    if task is None:
+        return {}
+
+    pool = runtime.context.pool
+    customer, reason = await _named_customer(state, task.args, pool)
+    request = _request(state)
+    # Validate first, then keep only what the handler typed (`_stated`): the
+    # guard compares the typed value, so "100,000" is read as a number before
+    # its digits are looked for.
+    draft = {
+        name: value if _stated(name, value, request) else None
+        for name, value in _details(task.args).model_dump(mode="json").items()
+    }
+    ref = task.args.get("claim_ref")
+    claim_ref = str(ref).strip().upper() if _stated("claim_ref", ref, request) else None
+
+    existing = await repository.get_claim(pool, claim_ref) if customer and claim_ref else None
+    if existing:
+        reason = (
+            f"{claim_ref} already exists, for {existing.get('customer_name')} "
+            f"({existing.get('customer_ref')}). A new claim needs a new reference, "
+            "or none — one will be assigned."
+        )
+
+    return {
+        # REPLACE the slice, for the same reason `retrieve` does.
+        "workflow_states": {
+            **state.get("workflow_states", {}),
+            WORKFLOW: {
+                "claims": [],
+                "customer": customer,
+                "claim_ref": claim_ref,
+                "draft": draft,
+                "needed": _needed(draft),
+                "reason": reason,
+            },
+        },
+        **_customer_in_focus([], customer),
+    }
+
+
+def route_after_prepare(
+    state: ControlTowerState,
+) -> Literal["not_registered", "ask_details", "create"]:
+    ws = _claims_state(state)
+    if ws.get("reason"):
+        return "not_registered"
+    return "ask_details" if ws.get("needed") else "create"
+
+
+async def ask_details(state: ControlTowerState) -> dict[str, Any]:
+    """Pause for the claim's facts. `interrupt()` first — see `request_information`."""
+    ws = _claims_state(state)
+    needed = ws.get("needed", [])
+    customer = ws.get("customer") or {}
+    which = ws.get("claim_ref") or "the new claim"
+    reply = interrupt(
+        {
+            "kind": "need_info",
+            "workflow": WORKFLOW,
+            "question": (
+                f"To register {which} for {customer.get('external_ref')} I need the "
+                f"{' and '.join(f.replace('_', ' ') for f in needed)}. "
+                "Please supply what you have; the claim type is required."
+            ),
+            "fields": needed,
+        }
+    )
+    return {"workflow_states": _merge_claims_state(state, reply=reply)}
+
+
+async def read_details(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[str, Any]:
+    """Read the reply into typed fields — the model call of the register pause.
+
+    Same failure handling as `read_reply`: every failure is caught and reads as
+    "nothing supplied", because an exception here would leave the task RUNNING
+    with the interrupt consumed. Same anti-invention guard as the planner's args
+    (`_stated`): a value the reply does not contain is not the handler's.
+    """
+    ws = _claims_state(state)
+    reply = str(ws.get("reply") or "")
+    needed = list(ws.get("needed") or [])
+    draft = dict(ws.get("draft") or {})
+
+    supplied: dict[str, Any] = {}
+    failure: str | None = None
+    try:
+        if reply.strip():
+            extractor = runtime.context.model.with_structured_output(
+                ClaimDetails, include_raw=True
+            )
+            result = await extractor.ainvoke(
+                [
+                    SystemMessage(
+                        content=READ_DETAILS_PROMPT.format(
+                            fields=", ".join(f.replace("_", " ") for f in needed)
+                        )
+                    ),
+                    HumanMessage(content=reply),
+                ]
+            )
+            parsed: ClaimDetails | None = result.get("parsed")
+            if parsed is None:
+                failure = str(result.get("parsing_error"))[:500]
+            else:
+                supplied = {
+                    k: v
+                    for k, v in parsed.model_dump(mode="json", exclude_none=True).items()
+                    if _stated(k, v, reply)
+                }
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        failure = f"{type(exc).__name__}: {exc}"[:500]
+
+    draft.update({k: v for k, v in supplied.items() if k in needed})
+    update: dict[str, Any] = {
+        "workflow_states": _merge_claims_state(
+            state,
+            draft=draft,
+            needed=_needed(draft),
+            reply=None,  # consumed
+            reason=None if draft.get("claim_type") else "the claim type was not supplied.",
+        )
+    }
+    if failure:
+        task = running_task(state["plan"], WORKFLOW)
+        update["errors"] = [
+            {
+                "task_id": task.id if task else None,
+                "node": "read_details",
+                "kind": "reply_unreadable",
+                "message": failure,
+                "retryable": False,
+            }
+        ]
+    return update
+
+
+def route_after_details(state: ControlTowerState) -> Literal["create", "not_registered"]:
+    """One ask, then decide. The type is the only thing worth refusing over;
+    an amount or date still unknown is recorded as unknown, which is what
+    first notice of loss usually looks like."""
+    return "not_registered" if _claims_state(state).get("reason") else "create"
+
+
+async def create(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[str, Any]:
+    """The write, in its own node with no interrupt anywhere near it.
+
+    The required documents come from `REQUIRED_DOCUMENTS`, so the row starts in
+    the status the lookup pause reads and `assess` reports what is still needed
+    — the claim is not paused a second time in the same turn to collect them.
+    A handler at first notice rarely has the incident report in hand; recording
+    that it is outstanding is the work, chasing it is a later turn.
+    """
+    ws = _claims_state(state)
+    draft = ws.get("draft") or {}
+    customer = ws.get("customer") or {}
+    pool = runtime.context.pool
+
+    row = await repository.create_claim(
+        pool,
+        customer_id=customer["id"],
+        claim_ref=ws.get("claim_ref"),
+        claim_type=draft["claim_type"],
+        amount=draft.get("amount"),
+        incident_date=draft.get("incident_date"),
+        missing_fields=REQUIRED_DOCUMENTS[draft["claim_type"]],
+    )
+    if row is None and ws.get("claim_ref"):
+        # `prepare` saw no such claim, so the reference was taken by THIS run:
+        # a process death between the INSERT and the checkpoint replayed the
+        # node. Read the claim it made rather than fail on a duplicate. With a
+        # minted reference the replay mints a second claim; the audit rows share
+        # a trace id, which is how the duplicate is found.
+        row = await repository.get_claim(pool, ws["claim_ref"])
+
+    await repository.record_audit_event(
+        pool,
+        trace_id=state["trace_id"],
+        session_id=state["session_id"],
+        workflow=WORKFLOW,
+        node="create",
+        status="ok",
+        detail={"claim_ref": (row or {}).get("claim_ref"), "supplied": draft},
+    )
+
+    claims = [row] if row else []
+    return {
+        "workflow_states": _merge_claims_state(
+            state,
+            claims=claims,
+            registered=True,
+            incomplete=[c for c in claims if c.get("missing_fields")],
+            missing_fields=list((row or {}).get("missing_fields") or []),
+        )
+    }
+
+
+async def not_registered(state: ControlTowerState) -> dict[str, Any]:
+    """Terminal, and an outcome rather than a failure: the workflow decided
+    correctly not to write.
+
+    The reason is written as the slice's `summary`, so compose passes it through
+    verbatim and makes no model call — the rule for any text a workflow wrote
+    itself. Narrated instead, Nova Pro appended a "Next step:" the facts never
+    contained (observed live: "Assign a new reference or none for the new claim").
+    """
+    task = running_task(state["plan"], WORKFLOW)
+    if task is None:
+        return {}
+    ws = _claims_state(state)
+    return {
+        "plan": task_delta(task, status=TaskStatus.DONE, result_ref="not_registered"),
+        "workflow_states": _merge_claims_state(
+            state,
+            outcome="not_registered",
+            summary=f"The claim was not registered: {ws.get('reason')}",
+        ),
+    }
+
+
+# ------------------------------------------------------------ retrieve_claims
 
 
 async def validate(state: ControlTowerState) -> dict[str, Any]:
@@ -507,17 +958,31 @@ async def summarise(state: ControlTowerState, runtime: Runtime[Deps]) -> dict[st
         tool="llm",
     )
 
-    # Three outcomes. A claim that is still short of information says so, rather
-    # than reporting a completed pause that changed nothing.
-    outcome = (
-        "information_incomplete"
-        if any(c.get("missing_fields") for c in ws.get("claims") or [])
-        else "summarised"
-    )
+    # A claim that is still short of information says so, rather than reporting
+    # a completed pause that changed nothing. A claim registered this turn is
+    # "registered" even when a document is outstanding: the outstanding document
+    # is in the next step, and the thing that happened was the registration.
+    if ws.get("registered"):
+        outcome = "registered"
+    elif any(c.get("missing_fields") for c in ws.get("claims") or []):
+        outcome = "information_incomplete"
+    else:
+        outcome = "summarised"
     return {
         "plan": task_delta(task, status=TaskStatus.DONE, result_ref=outcome),
         "workflow_states": _merge_claims_state(state, outcome=outcome, summary=summary),
     }
+
+
+def route_action(state: ControlTowerState) -> Literal["retrieve", "prepare"]:
+    """Which half of the workflow the running task asks for.
+
+    Only `register_claim` goes to the register path. Anything else — including
+    an action name the planner improvised, which happens — is a lookup, because
+    a lookup is the safe default: it writes nothing.
+    """
+    task = running_task(state["plan"], WORKFLOW)
+    return "prepare" if task and task.action == "register_claim" else "retrieve"
 
 
 def build_claims_graph(checkpointer=None):
@@ -541,8 +1006,20 @@ def build_claims_graph(checkpointer=None):
         .add_node("assess", assess)
         .add_node("summarise", summarise)
         .add_node("not_found", not_found)
-        .add_edge(START, "retrieve")
+        .add_node("prepare", prepare)
+        .add_node("ask_details", ask_details)
+        .add_node("read_details", read_details)
+        .add_node("create", create)
+        .add_node("not_registered", not_registered)
+        .add_conditional_edges(START, route_action, ["retrieve", "prepare"])
         .add_conditional_edges("retrieve", route_after_retrieve, ["validate", "not_found"])
+        .add_conditional_edges(
+            "prepare", route_after_prepare, ["not_registered", "ask_details", "create"]
+        )
+        .add_edge("ask_details", "read_details")
+        .add_conditional_edges("read_details", route_after_details, ["create", "not_registered"])
+        .add_edge("create", "assess")
+        .add_edge("not_registered", END)
         .add_conditional_edges("validate", route_after_validate, ["request_information", "assess"])
         .add_edge("request_information", "read_reply")
         .add_conditional_edges(

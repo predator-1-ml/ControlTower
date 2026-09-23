@@ -245,6 +245,21 @@ only on its task IP: the ALB was happy, the container health check on
 sets `HOSTNAME=0.0.0.0` explicitly. Locally the image is fine, which is why it
 passed every compose run.
 
+**`uvicorn --reload` on Windows leaves orphaned server children holding :8000.**
+A reload (or killing the parent) does not reliably end the previous
+`multiprocessing.spawn` child; it keeps its handle on the listening socket and
+keeps answering with the OLD code, so edits appear not to take effect and a
+fresh `make dev` "works" while the stale child serves. Cost an hour on
+2026-09-23. Before trusting a live check after an edit, kill every python
+process whose command line contains `spawn_main`, then start the backend again.
+
+**Nova Pro fills gaps from whatever it was shown.** The planner emitted the
+prompt's example reference (`CLM-5001`) as a new claim's reference, and a new
+claim's type and date from the previous claim in the transcript. The claims
+workflow therefore keeps a planner-supplied reference, type, amount or date
+only if the handler's own request contains it (`_stated`); anything else is
+minted or asked for. Add the same guard to any new field the model may fill.
+
 **Nothing loop-bound may be built at import time.** `AsyncPostgresSaver.__init__`
 captures the running loop, so the graph is compiled in the FastAPI lifespan.
 There is no importable module-level `graph`; handlers read `request.app.state.graph`.
@@ -260,8 +275,16 @@ There is no importable module-level `graph`; handlers read `request.app.state.gr
 - **Repository functions return plain dicts.** Anything a tool returns lands in
   checkpointed state, so it must survive JSON — `_serialise` coerces `date` and
   `Decimal`, which round-trip through psycopg but not through JSON.
-- **Seed fixtures are load-bearing.** Each of the four customers drives a
-  different workflow branch; integration tests assert against them. Changing the
-  seed can silently stop exercising a branch.
+- **Seed fixtures are load-bearing.** The first four customers and first three
+  claims are named by tests and the demo runbook; the rest each cover one
+  branch, stated in a comment beside the row. Changing the seed can silently
+  stop exercising a branch. `make seed` truncates `knowledge_chunks`, so it is
+  always followed by `make ingest`.
+- **The planner is shown both sides of the conversation, and the customer in
+  focus.** A handler's follow-up leans on the answer they just read ("register
+  one for them"); with human turns only, "them" had no referent. Both claims
+  and onboarding publish `customer_id` / `customer_ref` when they identify a
+  customer, and a node must never write `None` to either — no reducer, so it
+  would erase what the other workflow published.
 - **Source documents (`*.pdf`, `*.docx`) are gitignored.** The assignment PDF is
   marked "Classified as C2 - General Business" and this repo is public.
