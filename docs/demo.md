@@ -19,6 +19,18 @@ Skipping it produces no error: retrieval simply finds nothing and beat 3 answers
 "No internal policy document covers that question", which reads as a broken demo
 rather than an unembedded corpus.
 
+
+### Against the deployed stack
+
+The recording should be made against the public URL, not localhost: one of the
+five faults in `docs/deployment-walkthrough.md` cannot occur on localhost. The
+deployed database gets its fixtures the same way it gets its schema, as one-off
+tasks on the backend image; the commands are in that document, section 6.
+
+```bash
+cd terraform/environments/dev && terraform output -raw public_url   # sign in as `operator`
+```
+
 ---
 
 ## Beat 1 — Planning before execution
