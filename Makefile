@@ -3,7 +3,15 @@
 # Windows: run these from Git Bash, or execute the underlying commands directly.
 
 BACKEND := backend
-PY      := $(BACKEND)/.venv/Scripts/python.exe   # POSIX venvs: .venv/bin/python
+
+# uv lays the venv out per OS: Scripts/python.exe on Windows, bin/python on
+# POSIX. Hardcoding either breaks every target on the other. Windows always
+# sets OS=Windows_NT. The path is relative: every target cd's into $(BACKEND).
+ifeq ($(OS),Windows_NT)
+PY := .venv/Scripts/python.exe
+else
+PY := .venv/bin/python
+endif
 
 .DEFAULT_GOAL := help
 .PHONY: help setup up rebuild ps tail down logs migrate seed ingest test test-db lint fmt verify-resume clean
@@ -38,39 +46,39 @@ logs: ## Tail service logs
 	docker compose logs -f --tail=100
 
 migrate: ## Run checkpointer + domain migrations (advisory-locked, single process)
-	cd $(BACKEND) && .venv/Scripts/python.exe -m app.scripts.migrate
+	cd $(BACKEND) && $(PY) -m app.scripts.migrate
 
 dev: ## Run the backend locally on :8000
 	# --reload is REQUIRED on Windows, not just convenient: uvicorn returns
 	# ProactorEventLoop unless it is using a subprocess, and psycopg's async mode
 	# cannot use it. Without --reload the app dies at startup with PoolTimeout.
-	cd $(BACKEND) && .venv/Scripts/python.exe -m uvicorn app.main:app \
+	cd $(BACKEND) && $(PY) -m uvicorn app.main:app \
 		--host 127.0.0.1 --port 8000 --reload --timeout-keep-alive 305
 
 ingest: ## Embed knowledge chunks (needs live AWS credentials)
-	cd $(BACKEND) && .venv/Scripts/python.exe -m app.scripts.ingest
+	cd $(BACKEND) && $(PY) -m app.scripts.ingest
 
 seed: ## Load demo fixtures (safe to re-run; truncates first, so run ingest after)
-	cd $(BACKEND) && .venv/Scripts/python.exe -m app.scripts.seed
+	cd $(BACKEND) && $(PY) -m app.scripts.seed
 
 test: ## Run unit tests (no database needed)
-	cd $(BACKEND) && .venv/Scripts/python.exe -m pytest tests/ -q
+	cd $(BACKEND) && $(PY) -m pytest tests/ -q
 
 test-db: ## Run all tests including integration (needs: up, migrate, seed)
-	cd $(BACKEND) && CONTROL_TOWER_DB_TESTS=1 .venv/Scripts/python.exe -m pytest tests/ -q
+	cd $(BACKEND) && CONTROL_TOWER_DB_TESTS=1 $(PY) -m pytest tests/ -q
 
 lint: ## Lint and type-check
-	cd $(BACKEND) && .venv/Scripts/python.exe -m ruff check app tests
+	cd $(BACKEND) && $(PY) -m ruff check app tests
 
 fmt: ## Auto-format
-	cd $(BACKEND) && .venv/Scripts/python.exe -m ruff format app tests
+	cd $(BACKEND) && $(PY) -m ruff format app tests
 
 verify-resume: ## Prove durable execution across process death (needs: up, migrate)
 	@echo "--- process 1: run until the interrupt, then exit ---"
-	cd $(BACKEND) && .venv/Scripts/python.exe -m app.scripts.verify_resume start  --thread mk-$(USER)
+	cd $(BACKEND) && $(PY) -m app.scripts.verify_resume start  --thread mk-$(USER)
 	@echo ""
 	@echo "--- process 2: brand-new process, resumes from Postgres ---"
-	cd $(BACKEND) && .venv/Scripts/python.exe -m app.scripts.verify_resume resume --thread mk-$(USER)
+	cd $(BACKEND) && $(PY) -m app.scripts.verify_resume resume --thread mk-$(USER)
 
 clean: ## Remove venv, caches, and the Postgres volume
 	docker compose down -v
