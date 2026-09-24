@@ -268,9 +268,6 @@ make lint
 make verify-resume   # durable execution across process death
 ```
 
-> The Makefile uses the Windows venv path (`.venv/Scripts/python.exe`). On macOS
-> or Linux, replace it with `.venv/bin/python`.
-
 ---
 
 ## Known limitations
