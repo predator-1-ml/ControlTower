@@ -10,6 +10,8 @@ Terraform · GitHub Actions
 
 ![The plan grows from two workflows to three as the conversation moves on](docs/images/03-plan-extends.webp)
 
+<sub>Every screenshot in this README was captured on the deployed AWS stack, not on localhost.</sub>
+
 **Contents:** [1. Overview](#1-overview) ·
 [2. How the LangGraph orchestration works](#2-how-the-langgraph-orchestration-works) ·
 [3. How the frontend works](#3-how-the-frontend-works) ·
@@ -133,6 +135,10 @@ flowchart LR
 ## 3. How the frontend works
 
 ### What the operator sees
+
+These screenshots come from the deployed stack
+([section 5](#5-the-actual-deployment)): each request below travelled through the
+public ALB, the BFF, the private DNS name, and Bedrock.
 
 ![Empty workspace: three workflows, an empty plan and an activity log](docs/images/01-start.webp)
 
@@ -301,6 +307,11 @@ full demo was run against the public URL. Everything below links to real
 pipeline runs and pull requests. The long-form record is
 [`deployment-walkthrough.md`](docs/deployment-walkthrough.md).
 
+- **Live URL:**
+  <http://control-tower-dev-public-1783782943.ap-southeast-1.elb.amazonaws.com/>.
+  Sign-in is required. The stack is torn down after the demo, so the link may no
+  longer resolve.
+- The screenshots in [section 3](#3-how-the-frontend-works) were captured here.
 - `terraform apply` created **69 resources in about 7 minutes**. RDS was the
   slowest part.
 - The backend booted with `provider=bedrock, embeddings=cohere.embed-english-v3`.
